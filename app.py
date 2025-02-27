@@ -26,7 +26,7 @@ app.config.from_object(get_config())
 # CORS 설정
 CORS(app, resources={
     r"/*": {
-        "origins": [os.getenv('CORS_ORIGIN', 'http://localhost:3000')],
+        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr')],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
