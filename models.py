@@ -43,4 +43,15 @@ class WrongAnswer(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     question = db.Column(db.String(200), nullable=False)
     correct_answer = db.Column(db.String(200), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow) 
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# 단어 데이터베이스 모델 추가
+class Word(db.Model):
+    __tablename__ = 'words'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    english = db.Column(db.String(100), unique=True, nullable=False)
+    korean = db.Column(db.String(200), nullable=False)
+    level = db.Column(db.Integer, default=1)
+    used = db.Column(db.Boolean, default=False)
+    last_modified = db.Column(db.DateTime, default=datetime.utcnow) 

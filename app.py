@@ -16,7 +16,7 @@ import base64
 from level_system import LevelSystem
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from werkzeug.security import generate_password_hash, check_password_hash
-from models import db, User, WordSet, TestResult, WrongAnswer
+from models import db, User, WordSet, TestResult, WrongAnswer, Word
 from config import get_config
 from flask_migrate import Migrate
 
@@ -1144,6 +1144,83 @@ def login():
         }), 200
     
     return jsonify({"error": "Invalid username or password"}), 401
+
+# 자동 테이블 생성 (PostgreSQL 마이그레이션용)
+def create_tables():
+    with app.app_context():
+        db.create_all()
+        print("Tables created successfully!")
+        
+        # 관리자 계정 확인 및 생성
+        admin = User.query.filter_by(username='admin').first()
+        if not admin:
+            hashed_password = generate_password_hash('admin1234')
+            admin = User(username='admin', password=hashed_password, is_admin=True)
+            db.session.add(admin)
+            db.session.commit()
+            print("Admin account created successfully!")
+        
+        # 단어 데이터베이스 로드 및 단어장 생성
+        from word_database import load_word_database
+        word_database = load_word_database()
+        
+        # 단어장 확인
+        word_set = WordSet.query.first()
+        if not word_set:
+            # 단어 데이터베이스에서 30개 단어 선택
+            selected_words = random.sample(word_database, 30)
+            
+            # 새 단어장 생성
+            new_word_set = WordSet(
+                words=selected_words,
+                is_active=True
+            )
+            db.session.add(new_word_set)
+            db.session.commit()
+            print("Initial word set created successfully!")
+            
+        # 전체 단어 데이터베이스를 PostgreSQL에 로드
+        load_full_word_database()
+
+# 전체 단어 데이터베이스를 PostgreSQL에 로드하는 함수
+def load_full_word_database():
+    try:
+        # 단어 데이터베이스 로드
+        from word_database import load_word_database
+        word_database = load_word_database()
+        
+        # 단어 테이블 생성 (없는 경우)
+        with app.app_context():
+            # 이미 단어가 있는지 확인
+            word_count = Word.query.count()
+            
+            # 단어가 없으면 전체 단어 데이터베이스 로드
+            if word_count == 0:
+                for word in word_database:
+                    new_word = Word(
+                        english=word['english'],
+                        korean=word['korean'],
+                        level=int(word['level']) if isinstance(word['level'], str) else word['level'],
+                        used=False
+                    )
+                    db.session.add(new_word)
+                
+                db.session.commit()
+                print(f"전체 단어 데이터베이스 {len(word_database)}개 단어가 성공적으로 로드되었습니다.")
+            else:
+                print(f"단어 데이터베이스가 이미 로드되어 있습니다. 현재 {word_count}개 단어가 있습니다.")
+    
+    except Exception as e:
+        print(f"단어 데이터베이스 로드 중 오류 발생: {e}")
+
+# 첫 요청시 테이블 생성
+@app.before_first_request
+def before_first_request():
+    if os.getenv('FLASK_ENV') == 'production':
+        try:
+            create_tables()
+        except Exception as e:
+            print(f"Error creating tables: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
