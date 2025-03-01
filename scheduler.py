@@ -41,6 +41,8 @@ def reset_user_scores():
             # 모든 사용자의 점수를 0으로 초기화
             users = User.query.all()
             for user in users:
+                # 점수 초기화 전 현재 점수 저장
+                previous_score = user.current_score
                 user.current_score = 0
                 
                 # 새로운 테스트 결과 생성 (점수 초기화 기록)

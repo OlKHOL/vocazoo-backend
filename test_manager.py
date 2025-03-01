@@ -4,7 +4,7 @@ import json
 import random
 from flask import jsonify, current_app
 from datetime import datetime
-from models import db, User, WordSet, TestResult
+from models import db, User, WordSet, TestResult, WrongAnswer
 
 class TestState:
     def __init__(self, word_set_id=None):
@@ -129,7 +129,7 @@ class TestState:
                 if user.level >= 5:
                     final_score = self.score
                     # 오답노트 테스트인 경우 오답을 저장하지 않음
-                    wrong_answers_json = [] if self.is_wrong_answers_test else self.wrong_answers
+                    wrong_answers_json = json.dumps(self.wrong_answers) if not self.is_wrong_answers_test else json.dumps([])
                     
                     # 결과 저장
                     test_result = TestResult(

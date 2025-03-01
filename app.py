@@ -429,14 +429,18 @@ def create_word_set():
                 break
             next_id += 1
             
-        # 현재 존재하는 단어장의 단어들만 체크
+        # 현재 단어장에 사용된 단어들 확인
         used_words = set()
         for word_set in existing_word_sets:
             words = word_set.words
             used_words.update(w['english'] for w in words)
         
-        # 사용되지 않은 단어 30개 선택
-        unused_words = Word.query.filter(~Word.english.in_(used_words)).order_by(db.func.random()).limit(30).all()
+        # 사용되지 않은 단어 30개 선택 (가능한 경우)
+        query = Word.query
+        if used_words:
+            query = query.filter(~Word.english.in_(used_words))
+        
+        unused_words = query.order_by(db.func.random()).limit(30).all()
         
         if len(unused_words) < 30:
             # 사용 가능한 단어가 부족하면 전체 단어에서 랜덤 선택
@@ -444,7 +448,7 @@ def create_word_set():
             
         # 단어 리스트 생성
         next_words = [
-            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            {'english': w.english, 'korean': w.korean, 'level': str(w.level)} 
             for w in unused_words
         ]
         
@@ -609,25 +613,17 @@ def start_wrong_answers_test():
 @admin_required
 def manual_update_word_set():
     try:
-        # 사용되지 않은 단어 30개 선택
-        unused_words = Word.query.filter_by(used=False).order_by(db.func.random()).limit(30).all()
-        
-        if len(unused_words) < 30:
-            # 모든 단어가 사용됐으면 리셋
-            Word.query.update({Word.used: False})
-            db.session.commit()
-            
-            # 다시 30개 선택
-            unused_words = Word.query.order_by(db.func.random()).limit(30).all()
+        # 랜덤하게 30개 단어 선택
+        random_words = Word.query.order_by(db.func.random()).limit(30).all()
         
         # 단어 리스트 생성
         next_words = [
             {'english': w.english, 'korean': w.korean, 'level': w.level} 
-            for w in unused_words
+            for w in random_words
         ]
         
-        # 선택된 단어들 used 표시
-        for word in unused_words:
+        # 선택된 단어들 used 필드 업데이트
+        for word in random_words:
             word.used = True
         
         # 기존 활성 단어장 비활성화
@@ -653,7 +649,7 @@ def get_score_reset_history():
     user_id = verify_token(token)
     
     try:
-        # 사용자의 최근 테스트 결과를 가져옴
+        # 사용자의 최근 테스트 결과 중 점수가 0인 것을 가져옴 (스케줄러에 의한 점수 리셋)
         history_records = TestResult.query.filter_by(
             user_id=user_id, 
             score=0
@@ -662,8 +658,8 @@ def get_score_reset_history():
         ).limit(10).all()
         
         history = [{
-            'reset_date': str(record.completed_at),
-            'previous_score': 0  # 점수 리셋 기록은 저장하지 않으므로 0으로 표시
+            'reset_date': record.completed_at.isoformat() if record.completed_at else None,
+            'previous_score': 0  # 점수 리셋 기록은 별도로 저장하지 않으므로 0으로 표시
         } for record in history_records]
         
         return jsonify(history), 200
@@ -1056,6 +1052,81 @@ def get_word_sets():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/test_history", methods=["GET"])
+@token_required
+def get_test_history():
+    token = request.headers.get('Authorization')
+    user_id = verify_token(token)
+    
+    try:
+        # 사용자의 테스트 결과 조회
+        test_results = TestResult.query.filter_by(
+            user_id=user_id
+        ).order_by(
+            TestResult.completed_at.desc()
+        ).all()
+        
+        history = [{
+            'id': result.id,
+            'score': result.score,
+            'solved_count': result.solved_count,
+            'completed_at': result.completed_at.isoformat() if result.completed_at else None,
+            'word_set_id': result.word_set_id
+        } for result in test_results]
+        
+        return jsonify(history), 200
+    except Exception as e:
+        print(f"Error getting test history: {e}")
+        return jsonify({"error": "Failed to get test history"}), 500
+
+@app.route("/delete_test_record/<int:record_id>", methods=["DELETE"])
+@token_required
+def delete_test_record(record_id):
+    token = request.headers.get('Authorization')
+    user_id = verify_token(token)
+    
+    try:
+        # 테스트 결과 조회
+        test_result = TestResult.query.filter_by(
+            id=record_id,
+            user_id=user_id
+        ).first()
+        
+        if not test_result:
+            return jsonify({"error": "Test record not found"}), 404
+            
+        # 테스트 결과 삭제
+        db.session.delete(test_result)
+        db.session.commit()
+        
+        return jsonify({"message": "Test record deleted successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error deleting test record: {e}")
+        return jsonify({"error": "Failed to delete test record"}), 500
+
+@app.route("/check_admin", methods=["GET"])
+@token_required
+def check_admin():
+    token = request.headers.get('Authorization')
+    user_id = verify_token(token)
+    
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"is_admin": False}), 200
+            
+        return jsonify({"is_admin": user.is_admin}), 200
+    except Exception as e:
+        print(f"Error checking admin status: {e}")
+        return jsonify({"error": "Failed to check admin status"}), 500
+
+@app.route("/account", methods=["GET"])
+@token_required
+def get_account():
+    # /account/info와 동일한 기능을 제공하는 엔드포인트
+    return get_account_info()
+
 # 자동 테이블 생성 (PostgreSQL 마이그레이션용)
 def create_tables():
     with app.app_context():
@@ -1071,9 +1142,9 @@ def create_tables():
             db.session.commit()
             print("Admin account created successfully!")
 
-# 첫 요청시 테이블 생성
-@app.before_first_request
-def before_first_request():
+# 첫 요청시 테이블 생성 (Flask 2.0 이상에서는 권장되지 않음)
+# 대신 애플리케이션 초기화 시 create_tables 함수를 직접 호출
+with app.app_context():
     try:
         create_tables()
     except Exception as e:

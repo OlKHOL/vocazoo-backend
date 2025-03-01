@@ -1,123 +1,126 @@
-import sqlite3
+from flask import Flask
+from models import db, User, WordSet, Word, TestResult
+from flask_migrate import Migrate
+from datetime import datetime
+from config import get_config
 import json
-from word_database import load_word_database
+import os
 
 def load_word_database():
+    """word_database.py 파일에서 단어 데이터를 로드합니다."""
     words = []
-    with open('word_database.py', 'r', encoding='utf-8') as file:
-        for line in file:
-            if "{'english':" in line:
-                try:
-                    word_dict = eval(line.strip())
-                    word_dict['level'] = str(word_dict['level'])
-                    words.append(word_dict)
-                except:
-                    continue
+    seen_english = set()  # 중복 체크를 위한 집합
+    
+    try:
+        with open('word_database.py', 'r', encoding='utf-8') as file:
+            for line in file:
+                if "{'english':" in line:
+                    try:
+                        word_dict = eval(line.strip())
+                        english = word_dict['english']
+                        
+                        # 중복된 영단어 건너뛰기
+                        if english in seen_english:
+                            continue
+                            
+                        seen_english.add(english)
+                        word_dict['level'] = str(word_dict['level'])
+                        words.append(word_dict)
+                    except:
+                        continue
+    except Exception as e:
+        print(f"Error loading word database: {e}")
     return words
 
 def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
+    """
+    이 함수는 Flask 애플리케이션 컨텍스트 내에서 실행되어야 합니다.
+    예: with app.app_context(): init_db()
+    """
+    # 모든 테이블 생성
+    db.create_all()
     
-    # users 테이블
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            is_admin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            current_score FLOAT DEFAULT 0,
-            completed_tests INTEGER DEFAULT 0
-        )
-    ''')
-    
-    # word_sets 테이블
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS word_sets (
-            id INTEGER PRIMARY KEY,
-            words TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT FALSE,
-            created_by INTEGER,
-            visible_until TIMESTAMP,
-            FOREIGN KEY (created_by) REFERENCES users (id)
-        )
-    ''')
-    
-    # word_status 테이블
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS word_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            english TEXT UNIQUE NOT NULL,
-            korean TEXT NOT NULL,
-            modified_korean TEXT,
-            level INTEGER DEFAULT 1,
-            used BOOLEAN DEFAULT FALSE,
-            last_modified TIMESTAMP
-        )
-    ''')
-    
-    # test_results 테이블
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS test_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            score INTEGER NOT NULL,
-            solved_count INTEGER NOT NULL,
-            completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            wrong_answers TEXT,
-            word_set_id INTEGER,
-            FOREIGN KEY (user_id) REFERENCES users (id),
-            FOREIGN KEY (word_set_id) REFERENCES word_sets (id)
-        )
-    ''')
-    
-    # word_status 테이블에 초기 단어 데이터 삽입
+    # Word 테이블에 초기 단어 데이터 삽입
     words = load_word_database()
-    for word in words:
+    for word_data in words:
         try:
-            c.execute('''
-                INSERT OR IGNORE INTO word_status (english, korean, level)
-                VALUES (?, ?, ?)
-            ''', (word['english'], word['korean'], word['level']))
+            # 이미 존재하는 단어인지 확인
+            existing_word = Word.query.filter_by(english=word_data['english']).first()
+            if not existing_word:
+                new_word = Word(
+                    english=word_data['english'],
+                    korean=word_data['korean'],
+                    level=word_data['level'],
+                    used=False
+                )
+                db.session.add(new_word)
         except Exception as e:
-            print(f"Error inserting word {word['english']}: {e}")
+            db.session.rollback()
+            print(f"Error inserting word {word_data['english']}: {e}")
     
-    # 단어장 공개 스케줄 테이블 추가
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS word_set_schedule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            day_of_week INTEGER NOT NULL,
-            time TEXT NOT NULL
-        )
-    ''')
+    try:
+        db.session.commit()
+        print("Word data initialized successfully!")
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error committing word data: {e}")
     
-    # 점수 초기화 히스토리 테이블 추가
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS score_reset_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            reset_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            previous_score FLOAT,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
+    # 기본 관리자 계정 생성 (필요한 경우)
+    try:
+        admin = User.query.filter_by(username='admin').first()
+        if not admin:
+            from werkzeug.security import generate_password_hash
+            admin_user = User(
+                username='admin',
+                password=generate_password_hash('admin123'),  # 기본 비밀번호, 보안을 위해 변경 필요
+                is_admin=True,
+                level=10,
+                exp=0,
+                current_score=0,
+                completed_tests=0,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(admin_user)
+            db.session.commit()
+            print("Admin user created successfully!")
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error creating admin user: {e}")
     
-    # 기본 스케줄 추가
-    schedule = [(1, '00:00'),  # 화요일
-               (3, '00:00'),   # 목요일
-               (4, '00:00'),   # 금요일
-               (6, '00:00')]   # 일요일
+    # 기본 단어장 생성 (필요한 경우)
+    try:
+        active_word_set = WordSet.query.filter_by(is_active=True).first()
+        if not active_word_set:
+            # 랜덤 단어 30개 선택
+            random_words = Word.query.order_by(db.func.random()).limit(30).all()
+            
+            if random_words:
+                word_list = [
+                    {'english': w.english, 'korean': w.korean, 'level': w.level} 
+                    for w in random_words
+                ]
+                
+                new_word_set = WordSet(
+                    words=word_list,
+                    is_active=True,
+                    created_at=datetime.utcnow()
+                )
+                db.session.add(new_word_set)
+                db.session.commit()
+                print("Initial word set created successfully!")
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error creating initial word set: {e}")
     
-    c.executemany('''
-        INSERT OR IGNORE INTO word_set_schedule (day_of_week, time)
-        VALUES (?, ?)
-    ''', schedule)
-    
-    conn.commit()
-    conn.close()
+    print("Database initialized successfully!")
 
 if __name__ == "__main__":
-    init_db()
-    print("Database initialized successfully!") 
+    # 이 스크립트를 직접 실행할 때는 Flask 앱을 생성하고 컨텍스트를 설정해야 함
+    app = Flask(__name__)
+    app.config.from_object(get_config())
+    db.init_app(app)
+    migrate = Migrate(app, db)
+    
+    with app.app_context():
+        init_db()
+        print("Database initialized successfully!") 
