@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://postgres:password@localhost:5432/vocazoo')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://root:ljwpgre1024!!%40@postgresql:5432/vocazoo')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'your-secret-key')
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'vocazoo-secure-key-2024')
     JWT_ACCESS_TOKEN_EXPIRES = 7 * 24 * 60 * 60  # 7 days 
 
 class DevelopmentConfig(Config):

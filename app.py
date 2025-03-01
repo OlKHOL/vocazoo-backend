@@ -1,24 +1,21 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from auth import auth, token_required, verify_token
-from database_setup import init_db
 import json
-import sqlite3
 import os
 from test_manager import TestState
 from functools import wraps
 import time
-from database import get_db
 import random
-from scheduler import update_active_word_set
+from scheduler import init_scheduler
 from datetime import datetime
-import base64
 from level_system import LevelSystem
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, WordSet, TestResult, WrongAnswer, Word
 from config import get_config
 from flask_migrate import Migrate
+import csv
 
 app = Flask(__name__)
 app.config.from_object(get_config())
@@ -38,59 +35,20 @@ jwt = JWTManager(app)
 db.init_app(app)
 migrate = Migrate(app, db)
 
+# 스케줄러 초기화
+scheduler = init_scheduler(app)
+
 # 전역 변수
 test_started = False
 test = None
 
 # 데이터베이스 초기화 (개발 환경에서만)
 if os.getenv('FLASK_ENV') != 'production':
-    if not os.path.exists('users.db'):
-        init_db()
-        from word_database import load_word_database
-        words = load_word_database()
-        with app.app_context():
-            # 초기 단어장 생성
-            word_set = WordSet(
-                words=words[:30],
-                is_active=True
-            )
-            db.session.add(word_set)
-            db.session.commit()
+    with app.app_context():
+        db.create_all()
 
-# word_set_id 컬럼 추가
-conn = sqlite3.connect('users.db')
-c = conn.cursor()
-try:
-    # 컬럼이 존재하는지 확인
-    c.execute("PRAGMA table_info(test_results)")
-    columns = [column[1] for column in c.fetchall()]
-    
-    # word_set_id 컬럼이 없으면 추가
-    if 'word_set_id' not in columns:
-        c.execute('''
-            ALTER TABLE test_results
-            ADD COLUMN word_set_id INTEGER
-            REFERENCES word_sets(id)
-        ''')
-        conn.commit()
-
-    # score_reset_history 테이블이 없으면 생성
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS score_reset_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            reset_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            previous_score FLOAT,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    conn.commit()
-except Exception as e:
-    print(f"Error in database setup: {e}")
-finally:
-    conn.close()
-
-app.register_blueprint(auth)
+# 라우트 등록
+app.register_blueprint(auth, url_prefix='/auth')
 
 def admin_required(f):
     @wraps(f)
@@ -105,72 +63,22 @@ def admin_required(f):
     return decorated
 
 def get_or_create_active_word_set():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        # 이전 단어장 ID 저장
-        c.execute('SELECT id FROM word_sets WHERE is_active = TRUE')
-        prev_active_set = c.fetchone()
-
-        # 사용되지 않은 단어 30개 선택
-        c.execute('''
-            SELECT english, COALESCE(modified_korean, korean), level 
-            FROM word_status 
-            WHERE used = FALSE 
-            ORDER BY RANDOM() 
-            LIMIT 30
-        ''')
-        words = c.fetchall()
+        # 현재 활성화된 단어장 찾기
+        active_word_set = WordSet.query.filter_by(is_active=True).first()
         
-        if len(words) < 30:
-            # 모든 단어가 사용됐으면 리셋
-            c.execute('UPDATE word_status SET used = FALSE')
-            conn.commit()
+        # 활성화된 단어장이 있으면 반환
+        if active_word_set:
+            return active_word_set.words
             
-            c.execute('''
-                SELECT english, COALESCE(modified_korean, korean), level 
-                FROM word_status 
-                ORDER BY RANDOM() 
-                LIMIT 30
-            ''')
-            words = c.fetchall()
-        
-        # 단어 리스트 생성
-        next_words = [
-            {'english': w[0], 'korean': w[1], 'level': w[2]} 
-            for w in words
-        ]
-        
-        # 선택된 단어들 used 표시
-        for word in next_words:
-            c.execute('UPDATE word_status SET used = TRUE WHERE english = ?', 
-                     (word['english'],))
-        
-        # 새 단어장 생성
-        words_json = json.dumps(next_words)
-        c.execute('UPDATE word_sets SET is_active = FALSE')
-        c.execute('''
-            INSERT INTO word_sets (words, created_at, is_active)
-            VALUES (?, CURRENT_TIMESTAMP, TRUE)
-        ''', (words_json,))
-        
-        # 새로운 단어장 ID 가져오기
-        c.execute('SELECT id FROM word_sets WHERE is_active = TRUE')
-        new_active_set = c.fetchone()
-
-        if prev_active_set:
-            # 이전 단어장의 오답노트 초기화
-            c.execute('''
-                UPDATE test_results
-                SET wrong_answers = '[]'
-                WHERE word_set_id = ?
-            ''', (prev_active_set[0],))
-        
-        conn.commit()
-        return next_words
-    finally:
-        conn.close()
+        # 활성화된 단어장이 없으면 빈 단어장 반환
+        # 관리자가 직접 단어를 추가해야 함
+        return []
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error in get_or_create_active_word_set: {str(e)}")
+        # 오류 발생 시 빈 단어장 반환
+        return []
 
 @app.route("/start_test", methods=["POST", "OPTIONS"])
 def start_test():
@@ -263,111 +171,50 @@ def edit_word_set(set_id):
     if not words:
         return jsonify({"error": "단어 목록이 필요합니다"}), 400
         
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('SELECT id FROM word_sets WHERE id = ?', (set_id,))
-        if not c.fetchone():
+        # 단어장 존재 여부 확인
+        word_set = WordSet.query.get(set_id)
+        if not word_set:
             return jsonify({"error": "단어장을 찾을 수 없습니다"}), 404
             
-        words_json = json.dumps(words)
-        c.execute('UPDATE word_sets SET words = ? WHERE id = ?', (words_json, set_id))
+        # 단어장 업데이트
+        word_set.words = words
         
-        for word in words:
-            c.execute('''
-                UPDATE word_status 
-                SET modified_korean = ?, level = ?, last_modified = CURRENT_TIMESTAMP
-                WHERE english = ?
-            ''', (word['korean'], word['level'], word['english']))
+        # 수정된 단어들 Word 테이블 업데이트
+        for word_data in words:
+            word = Word.query.filter_by(english=word_data['english']).first()
+            if word:
+                word.korean = word_data['korean']
+                word.level = word_data['level']
+                word.last_modified = datetime.utcnow()
         
-        conn.commit()
+        db.session.commit()
         return jsonify({
             "message": "단어장이 수정되었습니다",
             "updated_words": words
         }), 200
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/admin/export_word_sets", methods=["GET"])
 @admin_required
 def export_word_sets():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        # 먼저 word_status 테이블에서 모든 단어의 최신 상태를 가져옴
-        c.execute('''
-            SELECT english, 
-                   COALESCE(modified_korean, korean) as current_korean,
-                   level,
-                   last_modified
-            FROM word_status
-            ORDER BY last_modified DESC
-        ''')
-        word_status = {row[0]: {'korean': row[1], 'level': row[2], 'last_modified': row[3]} 
-                      for row in c.fetchall()}
+        word_sets = WordSet.query.order_by(WordSet.id).all()
         
-        # 단어장 데이터 가져오기
-        c.execute('''
-            SELECT ws.id, ws.words, ws.created_at, u.username
-            FROM word_sets ws
-            LEFT JOIN users u ON ws.created_by = u.id
-            ORDER BY ws.id
-        ''')
-        word_sets = c.fetchall()
+        with open('word_sets.py', 'w', encoding='utf-8') as file:
+            file.write("# 단어장 목록\n\n")
+            for word_set in word_sets:
+                file.write(f"# 단어장 #{word_set.id}\n")
+                for word in word_set.words:
+                    file.write(f"{{ 'english': '{word['english']}', 'korean': '{word['korean']}', 'level': '{word['level']}' }},")
+                    file.write("\n")  # 각 단어 다음에 줄바꿈
+                file.write("\n")  # 단어장 구분을 위한 빈 줄
         
-        import os
-        import shutil
-        from datetime import datetime
-        
-        # 원본 파일 백업 (존재하는 경우)
-        original_file = 'word_database.py'
-        backup_file = f'word_database_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.py'
-        temp_file = 'word_database_temp.py'
-        
-        if os.path.exists(original_file):
-            shutil.copy2(original_file, backup_file)
-        
-        # 임시 파일에 먼저 쓰기
-        with open(temp_file, 'w', encoding='utf-8') as file:
-            file.write("# 단어 데이터베이스\n")
-            file.write(f"# 마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            file.write("word_database = [\n")
-            
-            # 모든 단어장의 단어들을 중복 없이 저장하되, 최신 수정사항 반영
-            seen_words = set()
-            for _, words_json, created_at, username in word_sets:
-                words = json.loads(words_json)
-                for word in words:
-                    english = word['english']
-                    if english not in seen_words:
-                        seen_words.add(english)
-                        # word_status의 최신 정보 사용
-                        current_status = word_status.get(english, word)
-                        file.write(f"    {{'english': '{english}', "
-                                 f"'korean': '{current_status['korean']}', "
-                                 f"'level': '{current_status['level']}'}},\n")
-            
-            file.write("]\n")
-        
-        # 임시 파일을 원본 파일로 이동 (안전한 덮어쓰기)
-        shutil.move(temp_file, original_file)
-        
-        message = "단어장이 word_database.py 파일로 저장되었습니다."
-        if os.path.exists(backup_file):
-            message += f" 이전 버전이 {backup_file}로 백업되었습니다."
-        
-        return jsonify({"message": message}), 200
+        return jsonify({"message": "단어장이 word_sets.py 파일로 저장되었습니다"}), 200
     except Exception as e:
-        # 오류 발생 시 임시 파일 삭제
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/get_current_word_set", methods=["GET"])
 @token_required
@@ -375,7 +222,7 @@ def get_current_word_set():
     try:
         words = get_or_create_active_word_set()
         return jsonify({
-            "words": [{'english': w['english'], 'korean': w['korean']} for w in words],
+            "words": words,
             "total_count": len(words)
         }), 200
     except Exception as e:
@@ -384,94 +231,78 @@ def get_current_word_set():
 @app.route("/get_word_set_history", methods=["GET"])
 @token_required
 def get_word_set_history():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    c.execute('''
-        SELECT id, words, created_at, is_active
-        FROM word_sets
-        ORDER BY created_at DESC
-        LIMIT 10
-    ''')
-    
-    results = c.fetchall()
-    conn.close()
-    
-    history = [{
-        'id': r[0],
-        'words': json.loads(r[1]),
-        'created_at': r[2],
-        'is_active': r[3]
-    } for r in results]
-    
-    return jsonify(history), 200
+    try:
+        # 최근 10개 단어장 조회
+        word_sets = WordSet.query.order_by(WordSet.created_at.desc()).limit(10).all()
+        
+        history = [{
+            'id': ws.id,
+            'words': ws.words,
+            'created_at': ws.created_at.isoformat() if ws.created_at else None,
+            'is_active': ws.is_active
+        } for ws in word_sets]
+        
+        return jsonify(history), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/word_set/<int:set_id>", methods=["GET"])
 @token_required
 def get_word_set(set_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('SELECT words FROM word_sets WHERE id = ?', (set_id,))
-    result = c.fetchone()
-    conn.close()
-    
-    if not result:
-        return jsonify({"error": "단어장을 찾을 수 없습니다"}), 404
-        
-    words = json.loads(result[0])
-    return jsonify({
-        "id": set_id,
-        "words": words
-    }), 200
-
-@app.route("/get_word_sets", methods=["GET"])
-@token_required
-def get_word_sets():
-    token = request.headers.get('Authorization')
-    user_id = verify_token(token)
-    
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        # 관리자 확인
-        c.execute('SELECT is_admin FROM users WHERE id = ?', (user_id,))
-        is_admin = bool(c.fetchone()[0])
+        word_set = WordSet.query.get(set_id)
         
-        # 단어장 조회
-        if is_admin:
-            c.execute('SELECT * FROM word_sets ORDER BY created_at DESC')
-        else:
-            c.execute('''
-                SELECT * FROM word_sets 
-                WHERE is_active = TRUE 
-                LIMIT 1
-            ''')
+        if not word_set:
+            return jsonify({"error": "단어장을 찾을 수 없습니다"}), 404
             
-        word_sets = c.fetchall()
-        return jsonify([{
-            'id': ws[0],
-            'words': json.loads(ws[1]),
-            'created_at': ws[2],
-            'is_active': bool(ws[3])
-        } for ws in word_sets]), 200
-    finally:
-        conn.close()
+        return jsonify({
+            "id": set_id,
+            "words": word_set.words
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/word_sets", methods=["GET"])
+@token_required
+def get_word_sets_list():
+    try:
+        # 모든 단어장 조회
+        word_sets_query = WordSet.query.order_by(WordSet.created_at.desc()).all()
+        
+        word_sets = []
+        for ws in word_sets_query:
+            words = ws.words
+            word_sets.append({
+                'id': ws.id,
+                'preview': words[:5] if words else [],  # 미리보기로 5개만
+                'created_at': ws.created_at.isoformat() if ws.created_at else None,
+                'is_active': ws.is_active,
+                'total_words': len(words) if words else 0,
+                'level_distribution': {
+                    'level1': len([w for w in words if w.get('level') == '1']),
+                    'level2': len([w for w in words if w.get('level') == '2']),
+                    'level3': len([w for w in words if w.get('level') == '3'])
+                }
+            })
+        
+        return jsonify(word_sets), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/delete_word_set/<int:set_id>", methods=["DELETE"])
 @admin_required
 def admin_delete_word_set(set_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('DELETE FROM word_sets WHERE id = ?', (set_id,))
-        conn.commit()
+        word_set = WordSet.query.get(set_id)
+        if not word_set:
+            return jsonify({"error": "단어장을 찾을 수 없습니다"}), 404
+            
+        db.session.delete(word_set)
+        db.session.commit()
         return jsonify({'message': '단어장이 삭제되었습니다'}), 200
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/get_final_score", methods=["GET", "OPTIONS"])
 def get_final_score():
@@ -509,16 +340,14 @@ def save_test_result():
         test.save_result(user_id)
         
         # 경험치 계산 및 레벨 업데이트
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
-        c.execute('SELECT level, exp FROM users WHERE id = ?', (user_id,))
-        current_level, current_exp = c.fetchone()
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "사용자를 찾을 수 없습니다"}), 404
         
         # 점수에 따른 경험치 계산
-        gained_exp = LevelSystem.calculate_test_exp(test.score, current_level)
+        gained_exp = LevelSystem.calculate_test_exp(test.score, user.level)
         new_level, new_exp, level_up = LevelSystem.process_exp_gain(
-            current_level, current_exp, gained_exp
+            user.level, user.exp, gained_exp
         )
         
         # 새로운 뱃지 확인
@@ -526,20 +355,14 @@ def save_test_result():
         if level_up:
             new_badge = LevelSystem.check_badge_unlock(new_level)
             if new_badge:
-                c.execute('SELECT badges FROM users WHERE id = ?', (user_id,))
-                badges = json.loads(c.fetchone()[0])
+                badges = user.badges if user.badges else []
                 badges.append(new_badge)
-                c.execute('UPDATE users SET badges = ? WHERE id = ?', 
-                         (json.dumps(badges), user_id))
+                user.badges = badges
         
         # 레벨과 경험치 업데이트
-        c.execute('''
-            UPDATE users 
-            SET level = ?, exp = ?
-            WHERE id = ?
-        ''', (new_level, new_exp, user_id))
-        
-        conn.commit()
+        user.level = new_level
+        user.exp = new_exp
+        db.session.commit()
         
         return jsonify({
             "message": "테스트 결과가 저장되었습니다",
@@ -549,54 +372,55 @@ def save_test_result():
         }), 200
         
     except Exception as e:
+        db.session.rollback()
         print(f"Error saving test result: {e}")
         return jsonify({"error": str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 @app.route("/word_set/current", methods=["GET"])
 @token_required
 def get_current_word_set_detail():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('''
-            SELECT w.id, w.words, w.created_at, u.username
-            FROM word_sets w
-            LEFT JOIN users u ON w.created_by = u.id
-            WHERE w.is_active = TRUE
-        ''')
-        current_set = c.fetchone()
+        # 현재 활성화된 단어장 조회
+        current_set = WordSet.query.filter_by(is_active=True).first()
         
         if not current_set:
             return jsonify({
                 "message": "현재 활성화된 단어장이 없습니다"
             }), 404
         
-        words = json.loads(current_set[1])
+        words = current_set.words
+        # 단어 목록을 레벨별로 정렬
+        sorted_words = sorted(words, key=lambda x: int(x['level']))
+        
+        # 생성자 정보 조회
+        creator_name = None
+        if hasattr(current_set, 'created_by') and current_set.created_by:
+            creator = User.query.get(current_set.created_by)
+            if creator:
+                creator_name = creator.username
         
         return jsonify({
-            "id": current_set[0],
-            "words": [{'english': w['english'], 'korean': w['korean']} for w in words],
-            "created_at": current_set[2],
-            "created_by": current_set[3],
-            "total_count": len(words)
+            "id": current_set.id,
+            "words": sorted_words,
+            "created_at": current_set.created_at.isoformat() if current_set.created_at else None,
+            "created_by": creator_name,
+            "total_count": len(words),
+            "level_distribution": {
+                "level1": len([w for w in words if w['level'] == '1']),
+                "level2": len([w for w in words if w['level'] == '2']),
+                "level3": len([w for w in words if w['level'] == '3'])
+            }
         }), 200
-    finally:
-        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/create_word_set", methods=["POST"])
 @admin_required
 def create_word_set():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
         # 현재 존재하는 단어장의 ID 목록 조회
-        c.execute('SELECT id FROM word_sets ORDER BY id')
-        existing_ids = [row[0] for row in c.fetchall()]
+        existing_word_sets = WordSet.query.order_by(WordSet.id).all()
+        existing_ids = [word_set.id for word_set in existing_word_sets]
         
         # 사용 가능한 가장 작은 ID 찾기
         next_id = 1
@@ -606,53 +430,38 @@ def create_word_set():
             next_id += 1
             
         # 현재 존재하는 단어장의 단어들만 체크
-        c.execute('SELECT words FROM word_sets')
         used_words = set()
-        for result in c.fetchall():
-            words = json.loads(result[0])
+        for word_set in existing_word_sets:
+            words = word_set.words
             used_words.update(w['english'] for w in words)
         
         # 사용되지 않은 단어 30개 선택
-        c.execute('''
-            SELECT english, COALESCE(modified_korean, korean), level 
-            FROM word_status 
-            WHERE english NOT IN ({})
-            ORDER BY RANDOM() 
-            LIMIT 30
-        '''.format(','.join('?' * len(used_words))), tuple(used_words))
+        unused_words = Word.query.filter(~Word.english.in_(used_words)).order_by(db.func.random()).limit(30).all()
         
-        words = c.fetchall()
-        
-        if len(words) < 30:
+        if len(unused_words) < 30:
             # 사용 가능한 단어가 부족하면 전체 단어에서 랜덤 선택
-            c.execute('''
-                SELECT english, COALESCE(modified_korean, korean), level 
-                FROM word_status 
-                ORDER BY RANDOM() 
-                LIMIT 30
-            ''')
-            words = c.fetchall()
+            unused_words = Word.query.order_by(db.func.random()).limit(30).all()
             
         # 단어 리스트 생성
         next_words = [
-            {'english': w[0], 'korean': w[1], 'level': w[2]} 
-            for w in words
+            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            for w in unused_words
         ]
         
-        # 새 단어장 생성 (ID 직접 지정)
-        words_json = json.dumps(next_words)
-        c.execute('''
-            INSERT INTO word_sets (id, words, created_at, is_active)
-            VALUES (?, ?, CURRENT_TIMESTAMP, FALSE)
-        ''', (next_id, words_json))
+        # 새 단어장 생성
+        new_word_set = WordSet(
+            id=next_id,
+            words=next_words,
+            is_active=False
+        )
+        db.session.add(new_word_set)
+        db.session.commit()
         
-        conn.commit()
         return jsonify({"message": "새로운 단어장이 생성되었습니다", "id": next_id}), 200
         
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/update_username", methods=["POST"])
 @token_required
@@ -665,60 +474,26 @@ def update_username():
     if not new_username:
         return jsonify({"message": "새로운 사용자명이 필요합니다"}), 400
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('SELECT id FROM users WHERE username = ? AND id != ?', (new_username, user_id))
-        if c.fetchone():
+        # 이미 사용 중인 사용자명인지 확인
+        existing_user = User.query.filter(User.username == new_username, User.id != user_id).first()
+        if existing_user:
             return jsonify({"message": "이미 사용 중인 사용자명입니다"}), 400
         
-        c.execute('UPDATE users SET username = ? WHERE id = ?', (new_username, user_id))
-        conn.commit()
+        # 사용자 찾기
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"message": "사용자를 찾을 수 없습니다"}), 404
+            
+        # 사용자명 업데이트
+        user.username = new_username
+        db.session.commit()
+        
         return jsonify({"message": "사용자명이 변경되었습니다"}), 200
-    finally:
-        conn.close()
-
-@app.route("/update_profile_image", methods=["POST", "OPTIONS"])
-@token_required
-def update_profile_image():
-    if request.method == "OPTIONS":
-        return jsonify({"message": "OK"}), 200
-        
-    token = request.headers.get('Authorization')
-    user_id = verify_token(token)
-    
-    if 'profileImage' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-        
-    file = request.files['profileImage']
-    if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
-        
-    if file:
-        try:
-            # 이미지를 base64로 인코딩
-            file_data = file.read()
-            encoded_image = base64.b64encode(file_data).decode('utf-8')
-            
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-            
-            # 프로필 이미지 업데이트
-            c.execute('UPDATE users SET profile_image = ? WHERE id = ?',
-                     (encoded_image, user_id))
-            conn.commit()
-            
-            return jsonify({
-                "message": "Profile image updated successfully",
-                "profileImage": encoded_image
-            }), 200
-        except Exception as e:
-            print(f"Error updating profile image: {e}")
-            return jsonify({"error": "Failed to update profile image"}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating username: {e}")
+        return jsonify({"message": "사용자명 변경 중 오류가 발생했습니다"}), 500
 
 @app.route("/account/info", methods=["GET"])
 @token_required
@@ -727,65 +502,35 @@ def get_account_info():
         token = request.headers.get('Authorization')
         user_id = verify_token(token)
         
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
-        c.execute('SELECT username, created_at, COALESCE(current_score, 0), COALESCE(completed_tests, 0) FROM users WHERE id = ?', (user_id,))
-        user_info = c.fetchone()
-        
-        if not user_info:
-            return jsonify({"error": "사용자를 찾을 수 없습니다"}), 404
-
-        avg_score = user_info[2] / user_info[3] if user_info[3] > 0 else 0
-        
-        created_at = user_info[1]
-        if created_at:
-            try:
-                created_at = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').isoformat()
-            except Exception as e:
-                print(f"Date conversion error: {e}")
-                created_at = None
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
             
-        response_data = {
-            "username": user_info[0],
-            "createdAt": created_at,
-            "stats": {
-                "currentScore": float(user_info[2]),
-                "totalScore": float(user_info[2]),
-                "totalTests": user_info[3],
-                "averageScore": round(float(avg_score), 2)
-            }
-        }
-        
-        return jsonify(response_data), 200
-        
+        # 사용자 정보 반환
+        return jsonify({
+            "username": user.username,
+            "level": user.level,
+            "exp": user.exp,
+            "is_admin": user.is_admin,
+            "badges": user.badges if user.badges else []
+        }), 200
     except Exception as e:
-        print(f"Error in get_account_info: {e}")
-        return jsonify({"error": "서버 오류가 발생했습니다"}), 500
-        
-    finally:
-        if 'conn' in locals():
-            conn.close()
+        print(f"Error getting account info: {e}")
+        return jsonify({"error": "Failed to get account info"}), 500
 
 @app.route("/get_available_words", methods=["GET"])
 @admin_required
 def get_available_words():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('''
-            SELECT english, COALESCE(modified_korean, korean), level 
-            FROM word_status 
-            ORDER BY level, english
-        ''')
+        words_query = Word.query.order_by(Word.level, Word.english).all()
         words = [
-            {'english': w[0], 'korean': w[1], 'level': w[2]} 
-            for w in c.fetchall()
+            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            for w in words_query
         ]
         return jsonify({'words': words}), 200
-    finally:
-        conn.close()
+    except Exception as e:
+        print(f"Error getting available words: {e}")
+        return jsonify({"error": "Failed to get available words"}), 500
 
 @app.route("/wrong_answers", methods=["GET"])
 @token_required
@@ -793,38 +538,32 @@ def get_wrong_answers():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
         # Check user level first
-        c.execute('SELECT level FROM users WHERE id = ?', (user_id,))
-        user_level = c.fetchone()[0]
-        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+            
         # Return empty list if user level is below 3
-        if user_level < 3:
+        if user.level < 3:
             return jsonify([]), 200
             
         # 현재 활성화된 단어장의 ID를 가져옴
-        c.execute('SELECT id FROM word_sets WHERE is_active = TRUE')
-        current_word_set = c.fetchone()
+        current_word_set = WordSet.query.filter_by(is_active=True).first()
         if not current_word_set:
             return jsonify([]), 200
 
         # 현재 단어장에 대한 모든 오답을 가져옴 (중복 제거)
-        c.execute('''
-            SELECT DISTINCT wrong_answers
-            FROM test_results
-            WHERE user_id = ? AND word_set_id = ?
-            ORDER BY completed_at DESC
-        ''', (user_id, current_word_set[0]))
+        results = TestResult.query.filter_by(
+            user_id=user_id, 
+            word_set_id=current_word_set.id
+        ).order_by(TestResult.completed_at.desc()).all()
         
-        results = c.fetchall()
         all_wrong_answers = set()
         
         for result in results:
-            if result[0]:  # wrong_answers가 NULL이 아닌 경우
-                wrong_answers = json.loads(result[0])
+            if result.wrong_answers:  # wrong_answers가 NULL이 아닌 경우
+                wrong_answers = json.loads(result.wrong_answers)
                 for wrong in wrong_answers:
                     # 튜플로 변환하여 set에 추가 (중복 제거)
                     wrong_tuple = (wrong['question'], wrong['correctAnswer'])
@@ -837,8 +576,9 @@ def get_wrong_answers():
         ]
         
         return jsonify(wrong_answers_list), 200
-    finally:
-        conn.close()
+    except Exception as e:
+        print(f"Error getting wrong answers: {e}")
+        return jsonify({"error": "Failed to get wrong answers"}), 500
 
 @app.route("/start_wrong_answers_test", methods=["POST"])
 @token_required
@@ -868,58 +608,43 @@ def start_wrong_answers_test():
 @app.route("/admin/update_word_set", methods=["POST"])
 @admin_required
 def manual_update_word_set():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
         # 사용되지 않은 단어 30개 선택
-        c.execute('''
-            SELECT english, COALESCE(modified_korean, korean), level 
-            FROM word_status 
-            WHERE used = FALSE 
-            ORDER BY RANDOM() 
-            LIMIT 30
-        ''')
-        words = c.fetchall()
+        unused_words = Word.query.filter_by(used=False).order_by(db.func.random()).limit(30).all()
         
-        if len(words) < 30:
+        if len(unused_words) < 30:
             # 모든 단어가 사용됐으면 리셋
-            c.execute('UPDATE word_status SET used = FALSE')
-            conn.commit()
+            Word.query.update({Word.used: False})
+            db.session.commit()
             
-            c.execute('''
-                SELECT english, COALESCE(modified_korean, korean), level 
-                FROM word_status 
-                ORDER BY RANDOM() 
-                LIMIT 30
-            ''')
-            words = c.fetchall()
+            # 다시 30개 선택
+            unused_words = Word.query.order_by(db.func.random()).limit(30).all()
         
         # 단어 리스트 생성
         next_words = [
-            {'english': w[0], 'korean': w[1], 'level': w[2]} 
-            for w in words
+            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            for w in unused_words
         ]
         
         # 선택된 단어들 used 표시
-        for word in next_words:
-            c.execute('UPDATE word_status SET used = TRUE WHERE english = ?', 
-                     (word['english'],))
+        for word in unused_words:
+            word.used = True
+        
+        # 기존 활성 단어장 비활성화
+        WordSet.query.filter_by(is_active=True).update({WordSet.is_active: False})
         
         # 새 단어장 생성
-        words_json = json.dumps(next_words)
-        c.execute('UPDATE word_sets SET is_active = FALSE')
-        c.execute('''
-            INSERT INTO word_sets (words, created_at, is_active)
-            VALUES (?, CURRENT_TIMESTAMP, TRUE)
-        ''', (words_json,))
+        new_word_set = WordSet(
+            words=next_words,
+            is_active=True
+        )
+        db.session.add(new_word_set)
+        db.session.commit()
         
-        conn.commit()
         return jsonify({"message": "단어장이 성공적으로 교체되었습니다"}), 200
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/score_reset_history", methods=["GET"])
 @token_required
@@ -927,52 +652,49 @@ def get_score_reset_history():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('''
-            SELECT reset_date, previous_score
-            FROM score_reset_history
-            WHERE user_id = ?
-            ORDER BY reset_date DESC
-            LIMIT 10
-        ''', (user_id,))
+        # 사용자의 최근 테스트 결과를 가져옴
+        history_records = TestResult.query.filter_by(
+            user_id=user_id, 
+            score=0
+        ).order_by(
+            TestResult.completed_at.desc()
+        ).limit(10).all()
+        
         history = [{
-            'reset_date': row[0],
-            'previous_score': row[1]
-        } for row in c.fetchall()]
+            'reset_date': str(record.completed_at),
+            'previous_score': 0  # 점수 리셋 기록은 저장하지 않으므로 0으로 표시
+        } for record in history_records]
+        
         return jsonify(history), 200
-    finally:
-        conn.close()
+    except Exception as e:
+        print(f"Error getting score reset history: {e}")
+        return jsonify({"error": "Failed to get score reset history"}), 500
 
 @app.route("/admin/word_sets/<int:set_id>", methods=["DELETE"])
 @admin_required
 def delete_word_set(set_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        # 활성화된 단어장은 삭제 불가
-        c.execute('SELECT is_active FROM word_sets WHERE id = ?', (set_id,))
-        result = c.fetchone()
+        # 단어장 찾기
+        word_set = WordSet.query.get(set_id)
         
-        if not result:
+        if not word_set:
             return jsonify({"error": "단어장을 찾을 수 없습니다"}), 404
             
-        if result[0]:
+        # 활성화된 단어장은 삭제 불가
+        if word_set.is_active:
             return jsonify({"error": "활성화된 단어장은 삭제할 수 없습니다"}), 400
         
         # 단어장 삭제
-        c.execute('DELETE FROM word_sets WHERE id = ?', (set_id,))
-        conn.commit()
+        db.session.delete(word_set)
+        db.session.commit()
         
         return jsonify({"message": "단어장이 삭제되었습니다"}), 200
         
     except Exception as e:
+        db.session.rollback()
+        print(f"Error deleting word set: {e}")
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/update_wrong_answers", methods=["POST"])
 @token_required
@@ -985,34 +707,28 @@ def update_wrong_answers():
         if not data or 'wrong_answers' not in data:
             return jsonify({"error": "잘못된 요청입니다."}), 400
             
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
         # 현재 활성화된 단어장의 ID를 가져옴
-        c.execute('SELECT id FROM word_sets WHERE is_active = TRUE')
-        current_word_set = c.fetchone()
+        current_word_set = WordSet.query.filter_by(is_active=True).first()
         if not current_word_set:
             return jsonify({"error": "활성화된 단어장이 없습니다."}), 400
 
         # 가장 최근 테스트 결과의 wrong_answers 업데이트
-        c.execute('''
-            UPDATE test_results 
-            SET wrong_answers = ? 
-            WHERE user_id = ? AND word_set_id = ?
-            ORDER BY completed_at DESC 
-            LIMIT 1
-        ''', (json.dumps(data['wrong_answers']), user_id, current_word_set[0]))
+        latest_test = TestResult.query.filter_by(
+            user_id=user_id, 
+            word_set_id=current_word_set.id
+        ).order_by(TestResult.completed_at.desc()).first()
         
-        conn.commit()
-        return jsonify({"message": "오답 정보가 저장되었습니다"}), 200
+        if latest_test:
+            latest_test.wrong_answers = json.dumps(data['wrong_answers'])
+            db.session.commit()
+            return jsonify({"message": "오답 정보가 저장되었습니다"}), 200
+        else:
+            return jsonify({"error": "테스트 결과를 찾을 수 없습니다."}), 404
         
     except Exception as e:
+        db.session.rollback()
         print(f"Error in update_wrong_answers: {e}")
         return jsonify({"error": "서버 오류가 발생했습니다"}), 500
-        
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 @app.route("/check_auth", methods=["GET"])
 @token_required
@@ -1026,42 +742,26 @@ def get_rankings():
         token = request.headers.get('Authorization')
         current_user_id = verify_token(token)
         
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
         # 레벨 5 이상인 유저들의 랭킹 정보 가져오기
-        c.execute('''
-            WITH RankedUsers AS (
-                SELECT 
-                    username,
-                    current_score,
-                    level,
-                    ROW_NUMBER() OVER (ORDER BY current_score DESC) as rank
-                FROM users
-                WHERE level >= 5
-            )
-            SELECT username, current_score, level, rank
-            FROM RankedUsers
-            ORDER BY rank
-        ''')
-        rankings = c.fetchall()
+        ranked_users = db.session.query(
+            User.username,
+            User.current_score,
+            User.level,
+            db.func.row_number().over(order_by=User.current_score.desc()).label('rank')
+        ).filter(User.level >= 5).all()
         
         # 현재 사용자의 랭킹 정보 가져오기
-        c.execute('''
-            SELECT 
-                username,
-                current_score,
-                level,
-                (
-                    SELECT COUNT(*) + 1 
-                    FROM users AS u2 
-                    WHERE u2.current_score > u1.current_score
-                    AND u2.level >= 5
-                ) as rank
-            FROM users AS u1
-            WHERE id = ?
-        ''', (current_user_id,))
-        current_user = c.fetchone()
+        current_user = User.query.get(current_user_id)
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+            
+        # 현재 사용자의 랭킹 계산
+        current_user_rank = db.session.query(
+            db.func.count(User.id) + 1
+        ).filter(
+            User.current_score > current_user.current_score,
+            User.level >= 5
+        ).scalar()
         
         return jsonify({
             "rankings": [{
@@ -1069,22 +769,19 @@ def get_rankings():
                 "username": username,
                 "score": float(score),
                 "level": level
-            } for username, score, level, rank in rankings],
+            } for username, score, level, rank in ranked_users],
             "currentUser": {
-                "rank": current_user[3],
-                "username": current_user[0],
-                "score": float(current_user[1]),
-                "level": current_user[2]
-            } if current_user else None,
-            "isQualified": current_user[2] >= 5 if current_user else False
+                "rank": current_user_rank,
+                "username": current_user.username,
+                "score": float(current_user.current_score) if current_user.current_score else 0,
+                "level": current_user.level
+            },
+            "isQualified": current_user.level >= 5
         }), 200
         
     except Exception as e:
         print(f"Error in get_rankings: {e}")
         return jsonify({"error": "랭킹 정보를 가져오는데 실패했습니다"}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 @app.route("/user/level", methods=["GET"])
 @token_required
@@ -1092,29 +789,25 @@ def get_user_level():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
     try:
-        c.execute('SELECT level, exp, badges FROM users WHERE id = ?', (user_id,))
-        user_data = c.fetchone()
+        user = User.query.get(user_id)
         
-        if not user_data:
+        if not user:
             return jsonify({"error": "User not found"}), 404
             
-        level, exp, badges = user_data
-        required_exp = LevelSystem.get_exp_for_level(level)
-        progress = LevelSystem.get_level_progress(level, exp)
+        required_exp = LevelSystem.get_exp_for_level(user.level)
+        progress = LevelSystem.get_level_progress(user.level, user.exp)
         
         return jsonify({
-            "level": level,
-            "current_exp": exp,
+            "level": user.level,
+            "current_exp": user.exp,
             "required_exp": required_exp,
             "progress": progress,
-            "badges": json.loads(badges)
+            "badges": user.badges if user.badges else []
         }), 200
-    finally:
-        conn.close()
+    except Exception as e:
+        print(f"Error getting user level: {e}")
+        return jsonify({"error": "Failed to get user level"}), 500
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -1145,6 +838,224 @@ def login():
     
     return jsonify({"error": "Invalid username or password"}), 401
 
+@app.route("/admin/upload_words", methods=["POST"])
+@admin_required
+def upload_words():
+    """CSV 파일에서 단어를 업로드하는 API"""
+    if 'file' not in request.files:
+        return jsonify({"error": "파일이 제공되지 않았습니다"}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "선택된 파일이 없습니다"}), 400
+        
+    if not file.filename.endswith('.csv'):
+        return jsonify({"error": "CSV 파일만 업로드 가능합니다"}), 400
+    
+    try:
+        # 파일 내용 읽기
+        content = file.read().decode('utf-8')
+        csv_reader = csv.reader(content.splitlines())
+        
+        # 첫 번째 행은 헤더로 간주
+        headers = next(csv_reader)
+        
+        # 필수 열 확인
+        required_columns = ['english', 'korean', 'level']
+        missing_columns = [col for col in required_columns if col not in headers]
+        
+        if missing_columns:
+            return jsonify({
+                "error": f"CSV 파일에 필수 열이 누락되었습니다: {', '.join(missing_columns)}"
+            }), 400
+            
+        # 열 인덱스 찾기
+        english_idx = headers.index('english')
+        korean_idx = headers.index('korean')
+        level_idx = headers.index('level')
+        
+        # 단어 추가
+        added_count = 0
+        updated_count = 0
+        error_count = 0
+        errors = []
+        
+        for row in csv_reader:
+            if len(row) < max(english_idx, korean_idx, level_idx) + 1:
+                error_count += 1
+                continue
+                
+            english = row[english_idx].strip()
+            korean = row[korean_idx].strip()
+            
+            try:
+                level = int(row[level_idx].strip())
+            except ValueError:
+                level = 1  # 기본값
+            
+            if not english or not korean:
+                error_count += 1
+                continue
+                
+            try:
+                # 기존 단어 확인
+                existing_word = Word.query.filter_by(english=english).first()
+                
+                if existing_word:
+                    # 기존 단어 업데이트
+                    existing_word.korean = korean
+                    existing_word.level = level
+                    existing_word.last_modified = datetime.utcnow()
+                    updated_count += 1
+                else:
+                    # 새 단어 추가
+                    new_word = Word(
+                        english=english,
+                        korean=korean,
+                        level=level,
+                        used=False
+                    )
+                    db.session.add(new_word)
+                    added_count += 1
+                    
+            except Exception as e:
+                error_count += 1
+                errors.append(f"{english}: {str(e)}")
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "단어 업로드 완료",
+            "added": added_count,
+            "updated": updated_count,
+            "errors": error_count,
+            "error_details": errors[:10]  # 처음 10개 오류만 반환
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/words", methods=["GET"])
+@admin_required
+def get_words():
+    """단어 목록을 페이지네이션으로 가져오는 API"""
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 50, type=int)
+    search = request.args.get('search', '')
+    level = request.args.get('level', type=int)
+    
+    query = Word.query
+    
+    # 검색어가 있으면 필터링
+    if search:
+        query = query.filter(
+            db.or_(
+                Word.english.ilike(f'%{search}%'),
+                Word.korean.ilike(f'%{search}%')
+            )
+        )
+    
+    # 레벨 필터링
+    if level:
+        query = query.filter_by(level=level)
+    
+    # 페이지네이션
+    pagination = query.order_by(Word.english).paginate(page=page, per_page=per_page)
+    
+    words = [{
+        'id': word.id,
+        'english': word.english,
+        'korean': word.korean,
+        'level': word.level,
+        'used': word.used,
+        'last_modified': word.last_modified.isoformat() if word.last_modified else None
+    } for word in pagination.items]
+    
+    return jsonify({
+        'words': words,
+        'total': pagination.total,
+        'pages': pagination.pages,
+        'current_page': page
+    }), 200
+
+@app.route("/admin/words/<int:word_id>", methods=["PUT"])
+@admin_required
+def update_word(word_id):
+    """단어 정보를 업데이트하는 API"""
+    word = Word.query.get_or_404(word_id)
+    data = request.get_json()
+    
+    if 'english' in data:
+        # 영어 단어 변경 시 중복 체크
+        if data['english'] != word.english:
+            existing = Word.query.filter_by(english=data['english']).first()
+            if existing:
+                return jsonify({"error": "이미 존재하는 영어 단어입니다"}), 400
+        word.english = data['english']
+        
+    if 'korean' in data:
+        word.korean = data['korean']
+        
+    if 'level' in data:
+        word.level = data['level']
+        
+    word.last_modified = datetime.utcnow()
+    
+    try:
+        db.session.commit()
+        return jsonify({
+            'id': word.id,
+            'english': word.english,
+            'korean': word.korean,
+            'level': word.level,
+            'used': word.used,
+            'last_modified': word.last_modified.isoformat()
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/words/<int:word_id>", methods=["DELETE"])
+@admin_required
+def delete_word(word_id):
+    """단어를 삭제하는 API"""
+    word = Word.query.get_or_404(word_id)
+    
+    try:
+        db.session.delete(word)
+        db.session.commit()
+        return jsonify({"message": "단어가 삭제되었습니다"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/get_word_sets", methods=["GET"])
+@token_required
+def get_word_sets():
+    token = request.headers.get('Authorization')
+    user_id = verify_token(token)
+    
+    try:
+        # 관리자 확인
+        user = User.query.get(user_id)
+        is_admin = user.is_admin if user else False
+        
+        # 단어장 조회
+        if is_admin:
+            word_sets = WordSet.query.order_by(WordSet.created_at.desc()).all()
+        else:
+            word_sets = WordSet.query.filter_by(is_active=True).limit(1).all()
+            
+        return jsonify([{
+            'id': ws.id,
+            'words': ws.words,
+            'created_at': ws.created_at.isoformat() if ws.created_at else None,
+            'is_active': ws.is_active
+        } for ws in word_sets]), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # 자동 테이블 생성 (PostgreSQL 마이그레이션용)
 def create_tables():
     with app.app_context():
@@ -1155,72 +1066,18 @@ def create_tables():
         admin = User.query.filter_by(username='admin').first()
         if not admin:
             hashed_password = generate_password_hash('admin1234')
-            admin = User(username='admin', password=hashed_password, is_admin=True)
+            admin = User(username='admin', password=hashed_password, is_admin=True, level=100)
             db.session.add(admin)
             db.session.commit()
             print("Admin account created successfully!")
-        
-        # 단어 데이터베이스 로드 및 단어장 생성
-        from word_database import load_word_database
-        word_database = load_word_database()
-        
-        # 단어장 확인
-        word_set = WordSet.query.first()
-        if not word_set:
-            # 단어 데이터베이스에서 30개 단어 선택
-            selected_words = random.sample(word_database, 30)
-            
-            # 새 단어장 생성
-            new_word_set = WordSet(
-                words=selected_words,
-                is_active=True
-            )
-            db.session.add(new_word_set)
-            db.session.commit()
-            print("Initial word set created successfully!")
-            
-        # 전체 단어 데이터베이스를 PostgreSQL에 로드
-        load_full_word_database()
-
-# 전체 단어 데이터베이스를 PostgreSQL에 로드하는 함수
-def load_full_word_database():
-    try:
-        # 단어 데이터베이스 로드
-        from word_database import load_word_database
-        word_database = load_word_database()
-        
-        # 단어 테이블 생성 (없는 경우)
-        with app.app_context():
-            # 이미 단어가 있는지 확인
-            word_count = Word.query.count()
-            
-            # 단어가 없으면 전체 단어 데이터베이스 로드
-            if word_count == 0:
-                for word in word_database:
-                    new_word = Word(
-                        english=word['english'],
-                        korean=word['korean'],
-                        level=int(word['level']) if isinstance(word['level'], str) else word['level'],
-                        used=False
-                    )
-                    db.session.add(new_word)
-                
-                db.session.commit()
-                print(f"전체 단어 데이터베이스 {len(word_database)}개 단어가 성공적으로 로드되었습니다.")
-            else:
-                print(f"단어 데이터베이스가 이미 로드되어 있습니다. 현재 {word_count}개 단어가 있습니다.")
-    
-    except Exception as e:
-        print(f"단어 데이터베이스 로드 중 오류 발생: {e}")
 
 # 첫 요청시 테이블 생성
 @app.before_first_request
 def before_first_request():
-    if os.getenv('FLASK_ENV') == 'production':
-        try:
-            create_tables()
-        except Exception as e:
-            print(f"Error creating tables: {e}")
+    try:
+        create_tables()
+    except Exception as e:
+        print(f"Error creating tables: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)

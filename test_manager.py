@@ -1,10 +1,10 @@
 import time
 from difflib import SequenceMatcher
-import sqlite3
 import json
 import random
-from flask import jsonify
+from flask import jsonify, current_app
 from datetime import datetime
+from models import db, User, WordSet, TestResult
 
 class TestState:
     def __init__(self, word_set_id=None):
@@ -23,16 +23,14 @@ class TestState:
             self.is_wrong_answers_test = True
             return
             
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT words FROM word_sets WHERE id = ?', (self.word_set_id,))
-        result = c.fetchone()
-        conn.close()
-
-        if result:
-            words = json.loads(result[0])
-            self.word_list = words.copy()
-            random.shuffle(self.word_list)
+        try:
+            with current_app.app_context():
+                word_set = WordSet.query.get(self.word_set_id)
+                if word_set:
+                    self.word_list = word_set.words.copy()
+                    random.shuffle(self.word_list)
+        except Exception as e:
+            print(f"Error loading words: {e}")
 
     def set_words(self, words):
         self.word_list = words.copy()
@@ -119,49 +117,42 @@ class TestState:
         }), 200
 
     def save_result(self, user_id):
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
         try:
-            # Get user's level first
-            c.execute('SELECT level FROM users WHERE id = ?', (user_id,))
-            user_level = c.fetchone()[0]
-            
-            # Only save results if user is level 5 or higher
-            if user_level >= 5:
-                final_score = self.score
-                # 오답노트 테스트인 경우 오답을 저장하지 않음
-                wrong_answers_json = "[]" if self.is_wrong_answers_test else json.dumps(self.wrong_answers)
+            with current_app.app_context():
+                # Get user's level first
+                user = User.query.get(user_id)
+                if not user:
+                    print(f"User {user_id} not found")
+                    return
                 
-                # 결과 저장
-                c.execute('''
-                    INSERT INTO test_results 
-                    (user_id, score, solved_count, wrong_answers, completed_at, word_set_id)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-                ''', (
-                    user_id, 
-                    round(final_score, 2),
-                    len(self.wrong_answers), 
-                    wrong_answers_json,
-                    self.word_set_id
-                ))
-                
-                # 오답노트 테스트가 아닌 경우에만 점수 업데이트
-                if not self.is_wrong_answers_test:
-                    c.execute('''
-                        UPDATE users 
-                        SET current_score = current_score + ?,
-                            completed_tests = completed_tests + 1
-                        WHERE id = ?
-                    ''', (round(final_score, 2), user_id))
-                
-                conn.commit()
+                # Only save results if user is level 5 or higher
+                if user.level >= 5:
+                    final_score = self.score
+                    # 오답노트 테스트인 경우 오답을 저장하지 않음
+                    wrong_answers_json = [] if self.is_wrong_answers_test else self.wrong_answers
+                    
+                    # 결과 저장
+                    test_result = TestResult(
+                        user_id=user_id,
+                        score=round(final_score, 2),
+                        solved_count=len(self.wrong_answers),
+                        wrong_answers=wrong_answers_json,
+                        word_set_id=self.word_set_id,
+                        completed_at=datetime.utcnow()
+                    )
+                    db.session.add(test_result)
+                    
+                    # 오답노트 테스트가 아닌 경우에만 점수 업데이트
+                    if not self.is_wrong_answers_test:
+                        user.current_score += round(final_score, 2)
+                        user.completed_tests += 1
+                    
+                    db.session.commit()
             
         except Exception as e:
+            db.session.rollback()
             print(f"Error saving test result: {e}")
             raise
-        finally:
-            conn.close()
 
     def get_final_score(self):
         elapsed_time = time.time() - self.start_time
