@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 from flask import current_app
 from models import db, WordSet, TestResult, User
 
-def update_active_word_set():
-    with current_app.app_context():
+def update_active_word_set(app):
+    with app.app_context():
         try:
             # 현재 활성화된 단어장 비활성화
             WordSet.query.filter_by(is_active=True).update({WordSet.is_active: False})
@@ -34,9 +34,9 @@ def update_active_word_set():
             db.session.rollback()
             print(f"Error updating word set: {e}")
 
-def reset_user_scores():
+def reset_user_scores(app):
     """매주 월요일 자정에 모든 사용자의 점수를 초기화"""
-    with current_app.app_context():
+    with app.app_context():
         try:
             # 모든 사용자의 점수를 0으로 초기화
             users = User.query.all()
@@ -66,14 +66,16 @@ def init_scheduler(app):
     # 매주 월요일 자정에 점수 초기화
     scheduler.add_job(
         reset_user_scores,
-        CronTrigger(day_of_week='mon', hour=0, minute=0)
+        CronTrigger(day_of_week='mon', hour=0, minute=0),
+        args=[app]
     )
     
     # 단어장 업데이트 스케줄 설정
     # 여기서는 간단히 매일 자정에 업데이트하도록 설정
     scheduler.add_job(
         update_active_word_set,
-        CronTrigger(hour=0, minute=0)
+        CronTrigger(hour=0, minute=0),
+        args=[app]
     )
     
     scheduler.start()
