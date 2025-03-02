@@ -23,7 +23,7 @@ app.config.from_object(get_config())
 # CORS 설정
 CORS(app, resources={
     r"/*": {
-        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr'), 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://vocazoo.co.kr', '*'],
+        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr'), 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://vocazoo.co.kr', 'https://api.vocazoo.co.kr', '*'],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": False  # withCredentials: false와 일치시킴
