@@ -92,10 +92,14 @@ def register():
         # 토큰 생성
         token = create_token(new_user.id)
         
-        return jsonify({
+        # 응답 형식 수정
+        response = jsonify({
             'token': token,
             'message': '회원가입이 완료되었습니다'
-        }), 201
+        })
+        
+        print("회원가입 응답:", response)
+        return response, 201
         
     except Exception as e:
         db.session.rollback()
