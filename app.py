@@ -811,12 +811,22 @@ def register_redirect():
     /register 경로로 들어오는 요청을 /auth/register로 리다이렉트합니다.
     이는 기존 코드와의 호환성을 위해 유지됩니다.
     """
+    print("register_redirect 함수 호출됨, 메소드:", request.method)
+    print("요청 데이터:", request.get_json())
+    
     if request.method == "GET":
         return jsonify({"message": "Register page - Please use /auth/register endpoint"}), 200
     
-    # auth.views.register() 대신 직접 auth 모듈의 함수 호출
-    from auth import register as auth_register
-    return auth_register()
+    try:
+        # auth.views.register() 대신 직접 auth 모듈의 함수 호출
+        from auth import register as auth_register
+        print("auth_register 함수 호출 전")
+        result = auth_register()
+        print("auth_register 함수 호출 후, 결과:", result)
+        return result
+    except Exception as e:
+        print("register_redirect 오류:", str(e))
+        return jsonify({"message": f"회원가입 처리 중 오류가 발생했습니다: {str(e)}"}), 500
 
 @app.route("/login", methods=["GET", "POST"])
 def login_redirect():

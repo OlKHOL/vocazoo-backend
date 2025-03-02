@@ -63,17 +63,21 @@ def token_required(f):
 
 @auth.route('/register', methods=['POST'])
 def register():
+    print("auth.register 함수 호출됨")
     data = request.get_json()
+    print("요청 데이터:", data)
     username = data.get('username')
     password = data.get('password')
     
     if not username or not password:
+        print("사용자명 또는 비밀번호 누락")
         return jsonify({"message": "사용자명과 비밀번호를 모두 입력해주세요"}), 400
     
     try:
         # 이미 존재하는 사용자인지 확인
         existing_user = User.query.filter_by(username=username).first()
         if existing_user:
+            print(f"이미 존재하는 사용자명: {username}")
             return jsonify({'message': '이미 존재하는 사용자명입니다'}), 400
         
         # 비밀번호 해시화
@@ -83,6 +87,7 @@ def register():
         new_user = User(username=username, password=hashed_password)
         db.session.add(new_user)
         db.session.commit()
+        print(f"새 사용자 생성 성공: {username}, ID: {new_user.id}")
         
         # 토큰 생성
         token = create_token(new_user.id)
@@ -94,6 +99,7 @@ def register():
         
     except Exception as e:
         db.session.rollback()
+        print(f"회원가입 오류: {str(e)}")
         return jsonify({'message': f'회원가입 중 오류가 발생했습니다: {str(e)}'}), 500
 
 @auth.route('/login', methods=['POST'])
