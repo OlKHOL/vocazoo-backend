@@ -805,34 +805,29 @@ def get_user_level():
         print(f"Error getting user level: {e}")
         return jsonify({"error": "Failed to get user level"}), 500
 
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.get_json()
+@app.route("/register", methods=["GET", "POST"])
+def register_redirect():
+    """
+    /register 경로로 들어오는 요청을 /auth/register로 리다이렉트합니다.
+    이는 기존 코드와의 호환성을 위해 유지됩니다.
+    """
+    if request.method == "GET":
+        return jsonify({"message": "Register page - Please use /auth/register endpoint"}), 200
     
-    if User.query.filter_by(username=data["username"]).first():
-        return jsonify({"error": "Username already exists"}), 400
-        
-    hashed_password = generate_password_hash(data["password"])
-    new_user = User(username=data["username"], password=hashed_password)
-    
-    db.session.add(new_user)
-    db.session.commit()
-    
-    return jsonify({"message": "User created successfully"}), 201
+    # POST 요청은 auth Blueprint의 register 함수로 전달
+    return auth.views.register()
 
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    user = User.query.filter_by(username=data["username"]).first()
+@app.route("/login", methods=["GET", "POST"])
+def login_redirect():
+    """
+    /login 경로로 들어오는 요청을 /auth/login으로 리다이렉트합니다.
+    이는 기존 코드와의 호환성을 위해 유지됩니다.
+    """
+    if request.method == "GET":
+        return jsonify({"message": "Login page - Please use /auth/login endpoint"}), 200
     
-    if user and check_password_hash(user.password, data["password"]):
-        access_token = create_access_token(identity=user.id)
-        return jsonify({
-            "token": access_token,
-            "is_admin": user.is_admin
-        }), 200
-    
-    return jsonify({"error": "Invalid username or password"}), 401
+    # POST 요청은 auth Blueprint의 login 함수로 전달
+    return auth.views.login()
 
 @app.route("/admin/upload_words", methods=["POST"])
 @admin_required
