@@ -23,7 +23,7 @@ app.config.from_object(get_config())
 # CORS 설정
 CORS(app, resources={
     r"/*": {
-        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr')],
+        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr'), 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://vocazoo.co.kr'],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
@@ -814,8 +814,9 @@ def register_redirect():
     if request.method == "GET":
         return jsonify({"message": "Register page - Please use /auth/register endpoint"}), 200
     
-    # POST 요청은 auth Blueprint의 register 함수로 전달
-    return auth.views.register()
+    # auth.views.register() 대신 직접 auth 모듈의 함수 호출
+    from auth import register as auth_register
+    return auth_register()
 
 @app.route("/login", methods=["GET", "POST"])
 def login_redirect():
@@ -826,8 +827,9 @@ def login_redirect():
     if request.method == "GET":
         return jsonify({"message": "Login page - Please use /auth/login endpoint"}), 200
     
-    # POST 요청은 auth Blueprint의 login 함수로 전달
-    return auth.views.login()
+    # auth.views.login() 대신 직접 auth 모듈의 함수 호출
+    from auth import login as auth_login
+    return auth_login()
 
 @app.route("/admin/upload_words", methods=["POST"])
 @admin_required
