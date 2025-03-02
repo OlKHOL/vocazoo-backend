@@ -30,11 +30,16 @@ def grant_admin_privileges(username):
                 print(f"사용자 '{username}'는 이미 관리자 권한을 가지고 있습니다.")
                 return
                 
-            # 사용자에게 관리자 권한 부여
+            # 사용자에게 관리자 권한 부여 및 레벨 100 설정
             user.is_admin = True
+            user.level = 100
+            
+            # 점수는 유지합니다
+            
             db.session.commit()
             print(f"사용자 '{username}'에게 관리자 권한이 부여되었습니다.")
-            print(f"관리자 정보: ID={user.id}, 사용자명={user.username}")
+            print(f"관리자 정보: ID={user.id}, 사용자명={user.username}, 레벨={user.level}")
+            print("이 계정은 랭킹에 등재되지 않지만 점수는 표시됩니다.")
         else:
             print(f"오류: 사용자 '{username}'를 찾을 수 없습니다.")
             print("먼저 일반 회원가입을 통해 계정을 생성한 후 이 스크립트를 실행하세요.")

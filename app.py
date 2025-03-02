@@ -738,25 +738,44 @@ def get_rankings():
         token = request.headers.get('Authorization')
         current_user_id = verify_token(token)
         
-        # 레벨 5 이상인 유저들의 랭킹 정보 가져오기
+        # 레벨 5 이상이고 관리자가 아닌 유저들의 랭킹 정보 가져오기
         ranked_users = db.session.query(
             User.username,
             User.current_score,
             User.level,
             db.func.row_number().over(order_by=User.current_score.desc()).label('rank')
-        ).filter(User.level >= 5).all()
+        ).filter(User.level >= 5, User.is_admin == False).all()
         
         # 현재 사용자의 랭킹 정보 가져오기
         current_user = User.query.get(current_user_id)
         if not current_user:
             return jsonify({"error": "User not found"}), 404
             
-        # 현재 사용자의 랭킹 계산
+        # 현재 사용자가 관리자인 경우 랭킹에 표시하지 않지만 점수는 보여줌
+        if current_user.is_admin:
+            return jsonify({
+                "rankings": [{
+                    "rank": rank,
+                    "username": username,
+                    "score": float(score),
+                    "level": level
+                } for username, score, level, rank in ranked_users],
+                "currentUser": {
+                    "rank": "관리자",
+                    "username": current_user.username,
+                    "score": float(current_user.current_score) if current_user.current_score else 0,
+                    "level": current_user.level
+                },
+                "isQualified": False
+            }), 200
+            
+        # 현재 사용자의 랭킹 계산 (관리자 제외)
         current_user_rank = db.session.query(
             db.func.count(User.id) + 1
         ).filter(
             User.current_score > current_user.current_score,
-            User.level >= 5
+            User.level >= 5,
+            User.is_admin == False
         ).scalar()
         
         return jsonify({
