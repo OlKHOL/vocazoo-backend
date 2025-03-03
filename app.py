@@ -50,8 +50,10 @@ def create_app():
     
     return app
 
+# Gunicorn을 위한 전역 app 인스턴스 생성
+app = create_app()
+
 if __name__ == '__main__':
-    app = create_app()
     # 내부 연결을 위한 호스트 설정
     host = '0.0.0.0' if os.getenv('USE_INTERNAL_DB', 'false').lower() == 'true' else '127.0.0.1'
     app.run(host=host, debug=True)
