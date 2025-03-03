@@ -864,29 +864,45 @@ def login_redirect():
 @admin_required
 def upload_words():
     """CSV 파일에서 단어를 업로드하는 API"""
+    print("Upload words endpoint called")
+    print("Files in request:", request.files)
+    print("Request headers:", dict(request.headers))
+    
     if 'file' not in request.files:
+        print("No file in request")
         return jsonify({"error": "파일이 제공되지 않았습니다"}), 400
         
     file = request.files['file']
+    print("File name:", file.filename)
+    
     if file.filename == '':
+        print("No selected file")
         return jsonify({"error": "선택된 파일이 없습니다"}), 400
         
     if not file.filename.endswith('.csv'):
+        print("Invalid file type:", file.filename)
         return jsonify({"error": "CSV 파일만 업로드 가능합니다"}), 400
     
     try:
         # 파일 내용 읽기
         content = file.read().decode('utf-8')
+        print("File content length:", len(content))
         csv_reader = csv.reader(content.splitlines())
         
         # 첫 번째 행은 헤더로 간주
-        headers = next(csv_reader)
+        try:
+            headers = next(csv_reader)
+            print("CSV headers:", headers)
+        except StopIteration:
+            print("Empty CSV file")
+            return jsonify({"error": "CSV 파일이 비어있습니다"}), 400
         
         # 필수 열 확인
         required_columns = ['english', 'korean', 'level']
         missing_columns = [col for col in required_columns if col not in headers]
         
         if missing_columns:
+            print("Missing columns:", missing_columns)
             return jsonify({
                 "error": f"CSV 파일에 필수 열이 누락되었습니다: {', '.join(missing_columns)}"
             }), 400
@@ -902,59 +918,82 @@ def upload_words():
         error_count = 0
         errors = []
         
-        for row in csv_reader:
-            if len(row) < max(english_idx, korean_idx, level_idx) + 1:
-                error_count += 1
-                continue
-                
-            english = row[english_idx].strip()
-            korean = row[korean_idx].strip()
-            
+        for row_num, row in enumerate(csv_reader, start=1):
             try:
-                level = int(row[level_idx].strip())
-            except ValueError:
-                level = 1  # 기본값
-            
-            if not english or not korean:
-                error_count += 1
-                continue
-                
-            try:
-                # 기존 단어 확인
-                existing_word = Word.query.filter_by(english=english).first()
-                
-                if existing_word:
-                    # 기존 단어 업데이트
-                    existing_word.korean = korean
-                    existing_word.level = level
-                    existing_word.last_modified = datetime.utcnow()
-                    updated_count += 1
-                else:
-                    # 새 단어 추가
-                    new_word = Word(
-                        english=english,
-                        korean=korean,
-                        level=level,
-                        used=False
-                    )
-                    db.session.add(new_word)
-                    added_count += 1
+                if len(row) < max(english_idx, korean_idx, level_idx) + 1:
+                    print(f"Invalid row length at row {row_num}:", row)
+                    error_count += 1
+                    errors.append(f"Row {row_num}: Invalid number of columns")
+                    continue
                     
-            except Exception as e:
+                english = row[english_idx].strip()
+                korean = row[korean_idx].strip()
+                
+                try:
+                    level = int(row[level_idx].strip())
+                except ValueError:
+                    print(f"Invalid level at row {row_num}:", row[level_idx])
+                    level = 1  # 기본값
+                
+                if not english or not korean:
+                    print(f"Empty english or korean at row {row_num}")
+                    error_count += 1
+                    errors.append(f"Row {row_num}: Empty english or korean")
+                    continue
+                    
+                try:
+                    # 기존 단어 확인
+                    existing_word = Word.query.filter_by(english=english).first()
+                    
+                    if existing_word:
+                        # 기존 단어 업데이트
+                        existing_word.korean = korean
+                        existing_word.level = level
+                        existing_word.last_modified = datetime.utcnow()
+                        updated_count += 1
+                        print(f"Updated word at row {row_num}:", english)
+                    else:
+                        # 새 단어 추가
+                        new_word = Word(
+                            english=english,
+                            korean=korean,
+                            level=level,
+                            used=False
+                        )
+                        db.session.add(new_word)
+                        added_count += 1
+                        print(f"Added new word at row {row_num}:", english)
+                        
+                except Exception as e:
+                    print(f"Error processing row {row_num}:", str(e))
+                    error_count += 1
+                    errors.append(f"Row {row_num} ({english}): {str(e)}")
+            
+            except Exception as row_error:
+                print(f"Error processing row {row_num}:", str(row_error))
                 error_count += 1
-                errors.append(f"{english}: {str(e)}")
+                errors.append(f"Row {row_num}: {str(row_error)}")
         
-        db.session.commit()
+        try:
+            db.session.commit()
+            print("Database commit successful")
+        except Exception as commit_error:
+            print("Database commit error:", str(commit_error))
+            db.session.rollback()
+            return jsonify({"error": "데이터베이스 저장 중 오류가 발생했습니다"}), 500
         
-        return jsonify({
+        result = {
             "message": "단어 업로드 완료",
             "added": added_count,
             "updated": updated_count,
             "errors": error_count,
             "error_details": errors[:10]  # 처음 10개 오류만 반환
-        }), 200
+        }
+        print("Upload result:", result)
+        return jsonify(result), 200
         
     except Exception as e:
+        print("Unexpected error:", str(e))
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
