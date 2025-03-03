@@ -5,9 +5,11 @@ from datetime import datetime, timedelta
 from functools import wraps
 from models import db, User
 from werkzeug.security import generate_password_hash, check_password_hash
+from config import get_config
 
 auth = Blueprint('auth', __name__)
-SECRET_KEY = "your-secret-key-here"  # 실제 배포시에는 환경변수로 관리
+config = get_config()
+SECRET_KEY = config.JWT_SECRET_KEY
 
 def create_token(user_id):
     """사용자 ID로 JWT 토큰 생성"""

@@ -74,12 +74,22 @@ def admin_required(f):
     @wraps(f)
     @jwt_required()
     def decorated(*args, **kwargs):
-        current_user_id = get_jwt_identity()
-        user = User.query.get(current_user_id)
-        
-        if not user or not user.is_admin:
-            return jsonify({"msg": "Admin privileges required"}), 403
-        return f(*args, **kwargs)
+        try:
+            current_user_id = get_jwt_identity()
+            if not current_user_id:
+                return jsonify({"error": "Invalid token"}), 401
+                
+            user = User.query.get(current_user_id)
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+                
+            if not user.is_admin:
+                return jsonify({"error": "Admin privileges required"}), 403
+                
+            return f(*args, **kwargs)
+        except Exception as e:
+            print(f"Error in admin_required: {str(e)}")
+            return jsonify({"error": "Token verification failed"}), 422
     return decorated
 
 def get_or_create_active_word_set():
@@ -1025,44 +1035,48 @@ def upload_words():
 @admin_required
 def get_words():
     """단어 목록을 페이지네이션으로 가져오는 API"""
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    search = request.args.get('search', '')
-    level = request.args.get('level', type=int)
-    
-    query = Word.query
-    
-    # 검색어가 있으면 필터링
-    if search:
-        query = query.filter(
-            db.or_(
-                Word.english.ilike(f'%{search}%'),
-                Word.korean.ilike(f'%{search}%')
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        search = request.args.get('search', '')
+        level = request.args.get('level', type=int)
+        
+        query = Word.query
+        
+        # 검색어가 있으면 필터링
+        if search:
+            query = query.filter(
+                db.or_(
+                    Word.english.ilike(f'%{search}%'),
+                    Word.korean.ilike(f'%{search}%')
+                )
             )
-        )
-    
-    # 레벨 필터링
-    if level:
-        query = query.filter_by(level=level)
-    
-    # 페이지네이션
-    pagination = query.order_by(Word.english).paginate(page=page, per_page=per_page)
-    
-    words = [{
-        'id': word.id,
-        'english': word.english,
-        'korean': word.korean,
-        'level': word.level,
-        'used': word.used,
-        'last_modified': word.last_modified.isoformat() if word.last_modified else None
-    } for word in pagination.items]
-    
-    return jsonify({
-        'words': words,
-        'total': pagination.total,
-        'pages': pagination.pages,
-        'current_page': page
-    }), 200
+        
+        # 레벨 필터링
+        if level:
+            query = query.filter_by(level=level)
+        
+        # 페이지네이션
+        pagination = query.order_by(Word.english).paginate(page=page, per_page=per_page)
+        
+        words = [{
+            'id': word.id,
+            'english': word.english,
+            'korean': word.korean,
+            'level': word.level,
+            'used': word.used,
+            'last_modified': word.last_modified.isoformat() if word.last_modified else None
+        } for word in pagination.items]
+        
+        return jsonify({
+            'words': words,
+            'total': pagination.total,
+            'pages': pagination.pages,
+            'current_page': page
+        }), 200
+    except Exception as e:
+        print(f"Error in get_words: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/words/<int:word_id>", methods=["PUT"])
 @admin_required
