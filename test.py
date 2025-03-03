@@ -1,14 +1,47 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_jwt_extended import jwt_required, get_jwt_identity
 import random
 import time
-from auth import auth, token_required, verify_token
 from models import db, User, WordSet, TestResult, WrongAnswer, Word
 import json
 import datetime
 import os
 from functools import wraps
 from difflib import SequenceMatcher
+from config import get_config
+import pandas as pd
+
+# 설정 로드
+config = get_config()
+
+app = Flask(__name__)
+app.config.from_object(config)
+
+# CORS 설정
+CORS(app, resources={r"/*": {"origins": config.CORS_ORIGINS}})
+
+# 데이터베이스 초기화
+db.init_app(app)
+
+test_started = False
+test = None
+
+def admin_required(f):
+    @wraps(f)
+    @jwt_required()
+    def decorated(*args, **kwargs):
+        try:
+            user_id = get_jwt_identity()
+            user = User.query.get(user_id)
+            
+            if not user or not user.is_admin:
+                return jsonify({'error': '관리자 권한이 필요합니다'}), 403
+                
+            return f(*args, **kwargs)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 422
+    return decorated
 
 # 단어 데이터베이스 로드 함수
 def load_word_database():
@@ -71,40 +104,6 @@ def initialize_word_status():
     except Exception as e:
         db.session.rollback()
         print(f"Error initializing word status: {e}")
-
-app = Flask(__name__)
-CORS(app, resources={
-    r"/*": {
-        "origins": ["http://localhost:3000", "http://192.168.*.*:3000"],  # 로컬 IP 허용
-        "methods": ["GET", "POST", "OPTIONS", "DELETE"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
-
-# 데이터베이스 설정
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:password@localhost:5432/vocazoo'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(app)
-
-test_started = False
-test = None
-
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'message': '토큰이 필요합니다'}), 401
-            
-        user_id = verify_token(token)
-        
-        user = User.query.get(user_id)
-        
-        if not user or not user.is_admin:
-            return jsonify({'message': '관리자 권한이 필요합니다'}), 403
-            
-        return f(*args, **kwargs)
-    return decorated
 
 def get_or_create_active_word_set():
     try:
@@ -236,7 +235,7 @@ class TestState:
         return time.time() - self.start_time > self.time_limit
 
 @app.route("/start_test", methods=["POST"])
-@token_required
+@jwt_required()
 def start_test():
     global test_started, test
     data = request.get_json()
@@ -255,7 +254,7 @@ def start_test():
         return jsonify({"error": str(e)}), 400
 
 @app.route("/get_question", methods=["GET"])
-@token_required
+@jwt_required()
 def get_question():
     global test_started, test
     
@@ -275,7 +274,7 @@ def get_question():
     }), 200
 
 @app.route("/check_answer", methods=["POST"])
-@token_required
+@jwt_required()
 def check_answer():
     global test_started, test
     
@@ -292,11 +291,9 @@ def check_answer():
     return test.check_answer(data["question"], data["answer"])
 
 @app.route("/end_test", methods=["POST"])
-@token_required
+@jwt_required()
 def end_test():
     global test_started, test
-    token = request.headers.get('Authorization')
-    user_id = verify_token(token)
     
     if not test_started or not test:
         return jsonify({"error": "테스트가 시작되지 않았습니다"}), 400
@@ -306,6 +303,7 @@ def end_test():
     try:
         with app.app_context():
             # 사용자 정보 가져오기
+            user_id = get_jwt_identity()
             user = User.query.get(user_id)
             if not user:
                 return jsonify({"error": "사용자를 찾을 수 없습니다"}), 404
@@ -424,7 +422,83 @@ def delete_word_set(word_set_id):
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
+@app.route("/admin/upload_words", methods=["POST"])
+@admin_required
+def upload_words():
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "파일이 없습니다"}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "선택된 파일이 없습니다"}), 400
+            
+        # 파일 확장자 확인
+        if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+            return jsonify({"error": "CSV 또는 Excel 파일만 업로드 가능합니다"}), 400
+            
+        # 파일 읽기
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+            
+        # 필수 열 확인
+        required_columns = ['english', 'korean', 'level']
+        if not all(col in df.columns for col in required_columns):
+            return jsonify({"error": "필수 열(english, korean, level)이 없습니다"}), 400
+            
+        # 데이터 검증 및 처리
+        added = 0
+        updated = 0
+        
+        for _, row in df.iterrows():
+            try:
+                # 데이터 검증
+                if pd.isna(row['english']) or pd.isna(row['korean']) or pd.isna(row['level']):
+                    continue
+                    
+                english = str(row['english']).strip()
+                korean = str(row['korean']).strip()
+                level = int(row['level'])
+                
+                if not english or not korean or not (1 <= level <= 5):
+                    continue
+                    
+                # 단어 업데이트 또는 추가
+                existing_word = Word.query.filter_by(english=english).first()
+                if existing_word:
+                    existing_word.korean = korean
+                    existing_word.level = level
+                    existing_word.last_modified = datetime.datetime.utcnow()
+                    updated += 1
+                else:
+                    new_word = Word(
+                        english=english,
+                        korean=korean,
+                        level=level,
+                        used=False
+                    )
+                    db.session.add(new_word)
+                    added += 1
+                    
+            except Exception as e:
+                print(f"Error processing row: {e}")
+                continue
+                
+        db.session.commit()
+        
+        return jsonify({
+            "message": "단어 업로드가 완료되었습니다",
+            "added": added,
+            "updated": updated
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"파일 처리 중 오류가 발생했습니다: {str(e)}"}), 500
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host="0.0.0.0", debug=True)
