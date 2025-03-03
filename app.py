@@ -25,8 +25,9 @@ CORS(app, resources={
     r"/*": {
         "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr'), 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://vocazoo.co.kr', 'https://api.vocazoo.co.kr', '*'],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": False  # withCredentials: false와 일치시킴
+        "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+        "supports_credentials": False,
+        "max_age": 86400
     }
 })
 
@@ -49,6 +50,25 @@ if os.getenv('FLASK_ENV') != 'production':
 
 # 라우트 등록
 app.register_blueprint(auth, url_prefix='/auth')
+
+# 요청 로깅 미들웨어 추가
+@app.before_request
+def log_request_info():
+    print("Request Method:", request.method)
+    print("Request URL:", request.url)
+    print("Request Headers:", dict(request.headers))
+    if request.is_json:
+        print("Request JSON:", request.get_json())
+    elif request.form:
+        print("Request Form:", dict(request.form))
+    if request.files:
+        print("Request Files:", request.files.keys())
+
+# 오류 핸들러 추가
+@app.errorhandler(422)
+def handle_unprocessable_entity(error):
+    print("422 Error occurred:", str(error))
+    return jsonify({"error": str(error)}), 422
 
 def admin_required(f):
     @wraps(f)
@@ -885,7 +905,11 @@ def upload_words():
     
     try:
         # 파일 내용 읽기
-        content = file.read().decode('utf-8')
+        content = file.read()
+        # UTF-8 BOM 체크 및 제거
+        if content.startswith(b'\xef\xbb\xbf'):
+            content = content[3:]
+        content = content.decode('utf-8')
         print("File content length:", len(content))
         csv_reader = csv.reader(content.splitlines())
         
