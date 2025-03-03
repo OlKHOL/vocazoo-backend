@@ -234,7 +234,7 @@ class TestState:
     def is_time_over(self):
         return time.time() - self.start_time > self.time_limit
 
-@app.route("/start_test", methods=["POST"])
+@app.route("/quiz/start", methods=["POST"])
 @jwt_required()
 def start_test():
     global test_started, test
@@ -253,7 +253,7 @@ def start_test():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/get_question", methods=["GET"])
+@app.route("/quiz/question", methods=["GET"])
 @jwt_required()
 def get_question():
     global test_started, test
@@ -273,7 +273,7 @@ def get_question():
         "level": question["level"]
     }), 200
 
-@app.route("/check_answer", methods=["POST"])
+@app.route("/quiz/check", methods=["POST"])
 @jwt_required()
 def check_answer():
     global test_started, test
@@ -290,7 +290,7 @@ def check_answer():
         
     return test.check_answer(data["question"], data["answer"])
 
-@app.route("/end_test", methods=["POST"])
+@app.route("/quiz/end", methods=["POST"])
 @jwt_required()
 def end_test():
     global test_started, test
@@ -333,6 +333,25 @@ def end_test():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
+@app.route("/quiz/score", methods=["GET"])
+@jwt_required()
+def get_score():
+    global test_started, test
+    
+    if not test_started or not test:
+        return jsonify({"error": "테스트가 시작되지 않았습니다"}), 400
+        
+    if test.is_time_over():
+        return jsonify({"error": "시간이 초과되었습니다"}), 400
+        
+    elapsed_time = time.time() - test.start_time
+    remaining_time = max(0, test.time_limit - elapsed_time)
+    
+    return jsonify({
+        "score": test.score,
+        "remaining_time": remaining_time
+    }), 200
 
 @app.route("/admin/create_word_set", methods=["POST"])
 @admin_required
