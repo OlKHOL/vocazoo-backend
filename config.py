@@ -15,8 +15,16 @@ class Config:
         'http://127.0.0.1:3000',
         'http://vocazoo.co.kr',
         'https://vocazoo.co.kr',
+        'https://www.vocazoo.co.kr',
+        'http://www.vocazoo.co.kr',
         'https://api.vocazoo.co.kr'
     ]
+    
+    # CORS 추가 설정
+    CORS_ALLOW_CREDENTIALS = True
+    CORS_EXPOSE_HEADERS = ['Content-Type', 'Authorization']
+    CORS_ALLOW_HEADERS = ['Content-Type', 'Authorization']
+    CORS_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
     
     # 보안 설정
     SESSION_COOKIE_SECURE = True
