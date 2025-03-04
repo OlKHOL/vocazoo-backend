@@ -23,13 +23,26 @@ app.config.from_object(get_config())
 # CORS 설정
 CORS(app, resources={
     r"/*": {
-        "origins": [os.getenv('CORS_ORIGIN', 'https://vocazoo.co.kr'), 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://vocazoo.co.kr', 'https://api.vocazoo.co.kr', '*'],
+        "origins": ["https://vocazoo.co.kr", "http://localhost:3000", "http://127.0.0.1:3000", "https://api.vocazoo.co.kr"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
-        "supports_credentials": False,
+        "supports_credentials": True,
+        "expose_headers": ["Content-Type", "Authorization"],
         "max_age": 86400
     }
 })
+
+# OPTIONS 메서드에 대한 전역 핸들러 추가
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    return '', 200, {
+        'Access-Control-Allow-Origin': request.headers.get('Origin', '*'),
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, X-Requested-With',
+        'Access-Control-Allow-Credentials': 'true',
+        'Access-Control-Max-Age': '86400'
+    }
 
 # JWT 설정
 jwt = JWTManager(app)

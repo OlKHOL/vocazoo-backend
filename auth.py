@@ -194,3 +194,33 @@ def check_admin():
     except Exception as e:
         print(f"Error checking admin status: {str(e)}")
         return jsonify({'message': f'관리자 권한 확인 중 오류가 발생했습니다: {str(e)}'}), 500
+
+@auth.route('/check', methods=['GET'])
+def check_auth_status():
+    token = request.headers.get('Authorization')
+    
+    if not token:
+        return jsonify({'authenticated': False}), 200
+        
+    try:
+        if token.startswith('Bearer '):
+            token = token.split(' ')[1]
+            
+        user_id = verify_token(token)
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({'authenticated': False}), 200
+            
+        return jsonify({
+            'authenticated': True,
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'is_admin': user.is_admin,
+                'level': user.level
+            }
+        }), 200
+    except Exception as e:
+        print(f"Auth check error: {str(e)}")
+        return jsonify({'authenticated': False}), 200  # 에러가 나도 200 반환
