@@ -50,8 +50,7 @@ class TestState:
         
         self.current_word = self.word_list.pop(0)
         return {
-            "english": self.current_word["english"],
-            "level": self.current_word["level"]
+            "english": self.current_word["english"]
         }
 
     def normalize_answer(self, answer):
@@ -88,7 +87,7 @@ class TestState:
             
             # 완전 일치하는 경우
             if user_answer == norm_correct:
-                self.score += int(self.current_word["level"]) * 10
+                self.score += self.score+10
                 return jsonify({
                     "result": "correct",
                     "message": "정답입니다!"
@@ -97,7 +96,7 @@ class TestState:
             # 유사도가 80% 이상인 경우
             similarity = self.similar(user_answer, norm_correct)
             if similarity >= 0.8:
-                self.score += int(self.current_word["level"]) * 10
+                self.score == self.score+10
                 return jsonify({
                     "result": "correct",
                     "message": f"유사한 답안이 인정되었습니다! (정확한 답: {correct_answer})"

@@ -228,7 +228,6 @@ def edit_word_set(set_id):
             word = Word.query.filter_by(english=word_data['english']).first()
             if word:
                 word.korean = word_data['korean']
-                word.level = word_data['level']
                 word.last_modified = datetime.utcnow()
 
         db.session.commit()
@@ -251,7 +250,7 @@ def export_word_sets():
             for word_set in word_sets:
                 file.write(f"# 단어장 #{word_set.id}\n")
                 for word in word_set.words:
-                    file.write(f"{{ 'english': '{word['english']}', 'korean': '{word['korean']}', 'level': '{word['level']}' }},")
+                    file.write(f"{{ 'english': '{word['english']}', 'korean': '{word['korean']}' }},")
                     file.write("\n")  # 각 단어 다음에 줄바꿈
                 file.write("\n")  # 단어장 구분을 위한 빈 줄
 
@@ -320,12 +319,7 @@ def get_word_sets_list():
                 'preview': words[:5] if words else [],  # 미리보기로 5개만
                 'created_at': ws.created_at.isoformat() if ws.created_at else None,
                 'is_active': ws.is_active,
-                'total_words': len(words) if words else 0,
-                'level_distribution': {
-                    'level1': len([w for w in words if w.get('level') == '1']),
-                    'level2': len([w for w in words if w.get('level') == '2']),
-                    'level3': len([w for w in words if w.get('level') == '3'])
-                }
+                'total_words': len(words) if words else 0
             })
 
         return jsonify(word_sets), 200
@@ -432,8 +426,6 @@ def get_current_word_set_detail():
             }), 404
 
         words = current_set.words
-        # 단어 목록을 레벨별로 정렬
-        sorted_words = sorted(words, key=lambda x: int(x['level']))
 
         # 생성자 정보 조회
         creator_name = None
@@ -444,15 +436,10 @@ def get_current_word_set_detail():
 
         return jsonify({
             "id": current_set.id,
-            "words": sorted_words,
+            "words": words,
             "created_at": current_set.created_at.isoformat() if current_set.created_at else None,
             "created_by": creator_name,
-            "total_count": len(words),
-            "level_distribution": {
-                "level1": len([w for w in words if w['level'] == '1']),
-                "level2": len([w for w in words if w['level'] == '2']),
-                "level3": len([w for w in words if w['level'] == '3'])
-            }
+            "total_count": len(words)
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -491,7 +478,7 @@ def create_word_set():
 
         # 단어 리스트 생성
         next_words = [
-            {'english': w.english, 'korean': w.korean, 'level': str(w.level)} 
+            {'english': w.english, 'korean': w.korean} 
             for w in unused_words
         ]
 
@@ -569,9 +556,9 @@ def get_account_info():
 @admin_required
 def get_available_words():
     try:
-        words_query = Word.query.order_by(Word.level, Word.english).all()
+        words_query = Word.query.order_by(Word.english).all()
         words = [
-            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            {'english': w.english, 'korean': w.korean} 
             for w in words_query
         ]
         return jsonify({'words': words}), 200
@@ -644,8 +631,7 @@ def start_wrong_answers_test():
         test = TestState()
         test.word_list = [{
             'english': word['question'],
-            'korean': word['correctAnswer'],
-            'level': '3'
+            'korean': word['correctAnswer']
         } for word in test_words]
         test.start_test()
         return jsonify({"message": "테스트가 시작되었습니다"}), 200
@@ -661,7 +647,7 @@ def manual_update_word_set():
 
         # 단어 리스트 생성
         next_words = [
-            {'english': w.english, 'korean': w.korean, 'level': w.level} 
+            {'english': w.english, 'korean': w.korean} 
             for w in random_words
         ]
 
@@ -903,146 +889,6 @@ def login_redirect():
     from auth import login as auth_login
     return auth_login()
 
-@app.route("/admin/upload_words", methods=["POST"])
-@admin_required
-def upload_words():
-    """CSV 파일에서 단어를 업로드하는 API"""
-    print("Upload words endpoint called")
-    print("Files in request:", request.files)
-    print("Request headers:", dict(request.headers))
-
-    if 'file' not in request.files:
-        print("No file in request")
-        return jsonify({"error": "파일이 제공되지 않았습니다"}), 400
-
-    file = request.files['file']
-    print("File name:", file.filename)
-
-    if file.filename == '':
-        print("No selected file")
-        return jsonify({"error": "선택된 파일이 없습니다"}), 400
-
-    if not file.filename.endswith('.csv'):
-        print("Invalid file type:", file.filename)
-        return jsonify({"error": "CSV 파일만 업로드 가능합니다"}), 400
-
-    try:
-        # 파일 내용 읽기
-        content = file.read()
-        # UTF-8 BOM 체크 및 제거
-        if content.startswith(b'\xef\xbb\xbf'):
-            content = content[3:]
-        content = content.decode('utf-8')
-        print("File content length:", len(content))
-        csv_reader = csv.reader(content.splitlines())
-
-        # 첫 번째 행은 헤더로 간주
-        try:
-            headers = next(csv_reader)
-            print("CSV headers:", headers)
-        except StopIteration:
-            print("Empty CSV file")
-            return jsonify({"error": "CSV 파일이 비어있습니다"}), 400
-
-        # 필수 열 확인
-        required_columns = ['english', 'korean', 'level']
-        missing_columns = [col for col in required_columns if col not in headers]
-
-        if missing_columns:
-            print("Missing columns:", missing_columns)
-            return jsonify({
-                "error": f"CSV 파일에 필수 열이 누락되었습니다: {', '.join(missing_columns)}"
-            }), 400
-
-        # 열 인덱스 찾기
-        english_idx = headers.index('english')
-        korean_idx = headers.index('korean')
-        level_idx = headers.index('level')
-
-        # 단어 추가
-        added_count = 0
-        updated_count = 0
-        error_count = 0
-        errors = []
-
-        for row_num, row in enumerate(csv_reader, start=1):
-            try:
-                if len(row) < max(english_idx, korean_idx, level_idx) + 1:
-                    print(f"Invalid row length at row {row_num}:", row)
-                    error_count += 1
-                    errors.append(f"Row {row_num}: Invalid number of columns")
-                    continue
-
-                english = row[english_idx].strip()
-                korean = row[korean_idx].strip()
-
-                try:
-                    level = int(row[level_idx].strip())
-                except ValueError:
-                    print(f"Invalid level at row {row_num}:", row[level_idx])
-                    level = 1  # 기본값
-
-                if not english or not korean:
-                    print(f"Empty english or korean at row {row_num}")
-                    error_count += 1
-                    errors.append(f"Row {row_num}: Empty english or korean")
-                    continue
-
-                try:
-                    # 기존 단어 확인
-                    existing_word = Word.query.filter_by(english=english).first()
-
-                    if existing_word:
-                        # 기존 단어 업데이트
-                        existing_word.korean = korean
-                        existing_word.level = level
-                        existing_word.last_modified = datetime.utcnow()
-                        updated_count += 1
-                        print(f"Updated word at row {row_num}:", english)
-                    else:
-                        # 새 단어 추가
-                        new_word = Word(
-                            english=english,
-                            korean=korean,
-                            level=level,
-                            used=False
-                        )
-                        db.session.add(new_word)
-                        added_count += 1
-                        print(f"Added new word at row {row_num}:", english)
-
-                except Exception as e:
-                    print(f"Error processing row {row_num}:", str(e))
-                    error_count += 1
-                    errors.append(f"Row {row_num} ({english}): {str(e)}")
-
-            except Exception as row_error:
-                print(f"Error processing row {row_num}:", str(row_error))
-                error_count += 1
-                errors.append(f"Row {row_num}: {str(row_error)}")
-
-        try:
-            db.session.commit()
-            print("Database commit successful")
-        except Exception as commit_error:
-            print("Database commit error:", str(commit_error))
-            db.session.rollback()
-            return jsonify({"error": "데이터베이스 저장 중 오류가 발생했습니다"}), 500
-
-        result = {
-            "message": "단어 업로드 완료",
-            "added": added_count,
-            "updated": updated_count,
-            "errors": error_count,
-            "error_details": errors[:10]  # 처음 10개 오류만 반환
-        }
-        print("Upload result:", result)
-        return jsonify(result), 200
-
-    except Exception as e:
-        print("Unexpected error:", str(e))
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/words", methods=["GET"])
 @admin_required
@@ -1052,7 +898,6 @@ def get_words():
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 50, type=int)
         search = request.args.get('search', '')
-        level = request.args.get('level', type=int)
         
         query = Word.query
         
@@ -1062,12 +907,7 @@ def get_words():
                 db.or_(
                     Word.english.ilike(f'%{search}%'),
                     Word.korean.ilike(f'%{search}%')
-                )
-            )
-        
-        # 레벨 필터링
-        if level:
-            query = query.filter_by(level=level)
+                ))
         
         # 페이지네이션
         pagination = query.order_by(Word.english).paginate(page=page, per_page=per_page)
@@ -1076,7 +916,6 @@ def get_words():
             'id': word.id,
             'english': word.english,
             'korean': word.korean,
-            'level': word.level,
             'used': word.used,
             'last_modified': word.last_modified.isoformat() if word.last_modified else None
         } for word in pagination.items]
@@ -1109,8 +948,6 @@ def update_word(word_id):
     if 'korean' in data:
         word.korean = data['korean']
 
-    if 'level' in data:
-        word.level = data['level']
 
     word.last_modified = datetime.utcnow()
 
@@ -1120,7 +957,6 @@ def update_word(word_id):
             'id': word.id,
             'english': word.english,
             'korean': word.korean,
-            'level': word.level,
             'used': word.used,
             'last_modified': word.last_modified.isoformat()
         }), 200
@@ -1243,20 +1079,7 @@ def get_account():
     # /account/info와 동일한 기능을 제공하는 엔드포인트
     return get_account_info()
 
-# 자동 테이블 생성 (PostgreSQL 마이그레이션용)
-def create_tables():
-    with app.app_context():
-        db.create_all()
-        print("Tables created successfully!")
 
-        # 관리자 계정 확인 및 생성
-        admin = User.query.filter_by(username='admin').first()
-        if not admin:
-            hashed_password = generate_password_hash('admin1234')
-            admin = User(username='admin', password=hashed_password, is_admin=True, level=100)
-            db.session.add(admin)
-            db.session.commit()
-            print("Admin account created successfully!")
 
 # 첫 요청시 테이블 생성 (Flask 2.0 이상에서는 권장되지 않음)
 # 대신 애플리케이션 초기화 시 create_tables 함수를 직접 호출

@@ -52,6 +52,5 @@ class Word(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     english = db.Column(db.String(100), unique=True, nullable=False)
     korean = db.Column(db.String(200), nullable=False)
-    level = db.Column(db.Integer, default=1)
     used = db.Column(db.Boolean, default=False)
     last_modified = db.Column(db.DateTime, default=datetime.utcnow) 

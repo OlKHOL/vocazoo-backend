@@ -24,7 +24,6 @@ def load_word_database():
                             continue
                             
                         seen_english.add(english)
-                        word_dict['level'] = str(word_dict['level'])
                         words.append(word_dict)
                     except:
                         continue
@@ -50,7 +49,6 @@ def init_db():
                 new_word = Word(
                     english=word_data['english'],
                     korean=word_data['korean'],
-                    level=word_data['level'],
                     used=False
                 )
                 db.session.add(new_word)
@@ -65,27 +63,6 @@ def init_db():
         db.session.rollback()
         print(f"Error committing word data: {e}")
     
-    # 기본 관리자 계정 생성 (필요한 경우)
-    try:
-        admin = User.query.filter_by(username='admin').first()
-        if not admin:
-            from werkzeug.security import generate_password_hash
-            admin_user = User(
-                username='admin',
-                password=generate_password_hash('admin123'),  # 기본 비밀번호, 보안을 위해 변경 필요
-                is_admin=True,
-                level=10,
-                exp=0,
-                current_score=0,
-                completed_tests=0,
-                created_at=datetime.utcnow()
-            )
-            db.session.add(admin_user)
-            db.session.commit()
-            print("Admin user created successfully!")
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error creating admin user: {e}")
     
     # 기본 단어장 생성 (필요한 경우)
     try:
@@ -96,7 +73,7 @@ def init_db():
             
             if random_words:
                 word_list = [
-                    {'english': w.english, 'korean': w.korean, 'level': w.level} 
+                    {'english': w.english, 'korean': w.korean} 
                     for w in random_words
                 ]
                 

@@ -66,7 +66,6 @@ def load_word_database():
                             continue
                             
                         seen_english.add(english)
-                        word_dict['level'] = str(word_dict['level'])
                         words.append(word_dict)
                     except:
                         continue
@@ -94,7 +93,6 @@ def initialize_word_status():
                     new_word = Word(
                         english=word['english'],
                         korean=word['korean'],
-                        level=word['level'],
                         used=False
                     )
                     db.session.add(new_word)
@@ -125,7 +123,7 @@ def get_or_create_active_word_set():
             
             # 단어 리스트 생성
             next_words = [
-                {'english': w.english, 'korean': w.korean, 'level': w.level} 
+                {'english': w.english, 'korean': w.korean} 
                 for w in unused_words
             ]
             
@@ -202,13 +200,13 @@ class TestState:
         for correct_answer in correct_answers:
             # 정확히 일치하는 경우
             if user_answer == correct_answer.strip():
-                self.score += int(self.current_word["level"])
+                self.score == self.score+10
                 return jsonify({"result": "correct"}), 200
                 
             # 유사도 검사 (85% 이상 유사하면 정답 처리)
             similarity = self.similar(user_answer, correct_answer.strip())
             if similarity >= 0.85:
-                self.score += int(self.current_word["level"])
+                self.score == self.score+10
                 return jsonify({
                     "result": "correct",
                     "message": f"오타가 있지만 정답으로 인정됩니다! (정확한 답: {correct_answer})"
@@ -269,8 +267,7 @@ def get_question():
         return jsonify({"error": "더 이상 문제가 없습니다"}), 400
         
     return jsonify({
-        "english": question["english"],
-        "level": question["level"]
+        "english": question["english"]
     }), 200
 
 @app.route("/quiz/check", methods=["POST"])
@@ -384,7 +381,7 @@ def admin_create_word_set():
                 
             # 단어 리스트 생성
             next_words = [
-                {'english': w.english, 'korean': w.korean, 'level': w.level} 
+                {'english': w.english, 'korean': w.korean} 
                 for w in unused_words
             ]
             
@@ -440,82 +437,6 @@ def delete_word_set(word_set_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
-
-@app.route("/admin/upload_words", methods=["POST"])
-@admin_required
-def upload_words():
-    try:
-        if 'file' not in request.files:
-            return jsonify({"error": "파일이 없습니다"}), 400
-            
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "선택된 파일이 없습니다"}), 400
-            
-        # 파일 확장자 확인
-        if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
-            return jsonify({"error": "CSV 또는 Excel 파일만 업로드 가능합니다"}), 400
-            
-        # 파일 읽기
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(file)
-        else:
-            df = pd.read_excel(file)
-            
-        # 필수 열 확인
-        required_columns = ['english', 'korean', 'level']
-        if not all(col in df.columns for col in required_columns):
-            return jsonify({"error": "필수 열(english, korean, level)이 없습니다"}), 400
-            
-        # 데이터 검증 및 처리
-        added = 0
-        updated = 0
-        
-        for _, row in df.iterrows():
-            try:
-                # 데이터 검증
-                if pd.isna(row['english']) or pd.isna(row['korean']) or pd.isna(row['level']):
-                    continue
-                    
-                english = str(row['english']).strip()
-                korean = str(row['korean']).strip()
-                level = int(row['level'])
-                
-                if not english or not korean or not (1 <= level <= 5):
-                    continue
-                    
-                # 단어 업데이트 또는 추가
-                existing_word = Word.query.filter_by(english=english).first()
-                if existing_word:
-                    existing_word.korean = korean
-                    existing_word.level = level
-                    existing_word.last_modified = datetime.datetime.utcnow()
-                    updated += 1
-                else:
-                    new_word = Word(
-                        english=english,
-                        korean=korean,
-                        level=level,
-                        used=False
-                    )
-                    db.session.add(new_word)
-                    added += 1
-                    
-            except Exception as e:
-                print(f"Error processing row: {e}")
-                continue
-                
-        db.session.commit()
-        
-        return jsonify({
-            "message": "단어 업로드가 완료되었습니다",
-            "added": added,
-            "updated": updated
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": f"파일 처리 중 오류가 발생했습니다: {str(e)}"}), 500
 
 if __name__ == "__main__":
     with app.app_context():
