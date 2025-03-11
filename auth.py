@@ -145,7 +145,11 @@ def get_account():
 
         return jsonify({
             'username': user.username,
-            'is_admin': bool(user.is_admin)
+            'level': user.level,
+            'exp': user.exp,
+            'is_admin': bool(user.is_admin),
+            'badges': user.badges if user.badges else [],
+            'current_score': float(user.current_score) if user.current_score else 0
         }), 200
     except Exception as e:
         return jsonify({'message': f'계정 정보 조회 중 오류가 발생했습니다: {str(e)}'}), 500
