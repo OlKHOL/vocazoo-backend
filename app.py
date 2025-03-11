@@ -21,16 +21,14 @@ app = Flask(__name__)
 app.config.from_object(get_config())
 
 # CORS 설정
-CORS(app, resources={
-    r"/*": {
-        "origins": ["https://vocazoo.co.kr", "http://localhost:3000", "http://127.0.0.1:3000", "https://api.vocazoo.co.kr"],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
-        "supports_credentials": True,
-        "expose_headers": ["Content-Type", "Authorization"],
-        "max_age": 86400
-    }
-})
+CORS(app, 
+     resources={r"/*": {
+         "origins": ["https://vocazoo.co.kr"],
+         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+         "allow_headers": ["Content-Type", "Authorization"],
+         "supports_credentials": True,
+         "expose_headers": ["Content-Type", "Authorization"]
+     }})
 
 # OPTIONS 메서드에 대한 전역 핸들러 추가
 @app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
