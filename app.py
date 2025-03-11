@@ -16,6 +16,7 @@ from models import db, User, WordSet, TestResult, WrongAnswer, Word
 from config import get_config
 from flask_migrate import Migrate
 import csv
+import io
 
 app = Flask(__name__)
 app.config.from_object(get_config())
@@ -1077,7 +1078,56 @@ def get_account():
     # /account/info와 동일한 기능을 제공하는 엔드포인트
     return get_account_info()
 
-
+@app.route("/admin/upload_words", methods=["POST"])
+@admin_required
+def upload_words():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+        
+    if not file.filename.endswith('.csv'):
+        return jsonify({"error": "Only CSV files are allowed"}), 400
+    
+    try:
+        # CSV 파일 읽기
+        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+        csv_input = csv.reader(stream)
+        next(csv_input)  # 헤더 스킵
+        
+        words_to_add = []
+        duplicates = []
+        
+        for row in csv_input:
+            if len(row) < 2:
+                continue
+                
+            english, korean = row[0].strip(), row[1].strip()
+            
+            # 이미 존재하는 단어 체크
+            existing_word = Word.query.filter_by(english=english).first()
+            if existing_word:
+                duplicates.append(english)
+                continue
+            
+            word = Word(english=english, korean=korean)
+            words_to_add.append(word)
+        
+        # 새 단어들 추가
+        if words_to_add:
+            db.session.bulk_save_objects(words_to_add)
+            db.session.commit()
+        
+        return jsonify({
+            "message": f"{len(words_to_add)} words added successfully",
+            "duplicates": duplicates
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 # 첫 요청시 테이블 생성 (Flask 2.0 이상에서는 권장되지 않음)
 # 대신 애플리케이션 초기화 시 create_tables 함수를 직접 호출
