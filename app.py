@@ -24,9 +24,9 @@ app.config.from_object(get_config())
 # CORS 설정
 CORS(app, 
      resources={r"/*": {
-         "origins": ["https://vocazoo.co.kr"],
+         "origins": ["https://vocazoo.co.kr", "http://vocazoo.co.kr", "http://api.vocazoo.co.kr", "https://api.vocazoo.co.kr"],
          "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-         "allow_headers": ["Content-Type", "Authorization"],
+         "allow_headers": ["Content-Type", "Authorization", "Accept", "Origin", "Content-Length"],
          "supports_credentials": True,
          "expose_headers": ["Content-Type", "Authorization"]
      }})
@@ -38,7 +38,7 @@ def handle_options(path):
     return '', 200, {
         'Access-Control-Allow-Origin': request.headers.get('Origin', '*'),
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, X-Requested-With',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, Origin, Content-Length',
         'Access-Control-Allow-Credentials': 'true',
         'Access-Control-Max-Age': '86400'
     }
