@@ -1088,14 +1088,23 @@ def upload_words():
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
         
-    if not file.filename.endswith('.csv'):
-        return jsonify({"error": "Only CSV files are allowed"}), 400
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.txt')):
+        return jsonify({"error": "Only CSV and TXT files are allowed"}), 400
     
     try:
-        # CSV 파일 읽기
+        # 파일 읽기
         stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
-        csv_input = csv.reader(stream)
-        next(csv_input)  # 헤더 스킵
+        
+        # CSV 또는 TXT 파일 읽기
+        if file.filename.endswith('.csv'):
+            csv_input = csv.reader(stream)
+            next(csv_input)  # 헤더 스킵
+        else:  # TXT 파일
+            lines = stream.readlines()
+            # TXT 파일의 첫 줄이 헤더인 경우 스킵
+            if lines and lines[0].strip().lower() in ['english,korean', 'english, korean']:
+                lines = lines[1:]
+            csv_input = [line.strip().split(',') for line in lines if line.strip()]
         
         words_to_add = []
         duplicates = []
@@ -1105,6 +1114,10 @@ def upload_words():
                 continue
                 
             english, korean = row[0].strip(), row[1].strip()
+            
+            # 따옴표 제거 (있는 경우)
+            english = english.strip('"').strip("'")
+            korean = korean.strip('"').strip("'")
             
             # 이미 존재하는 단어 체크
             existing_word = Word.query.filter_by(english=english).first()
