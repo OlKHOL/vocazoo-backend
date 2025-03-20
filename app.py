@@ -1102,11 +1102,9 @@ def upload_words():
     
     try:
         print("[Upload] Reading file content...")
-        # 파일 내용을 바이트로 읽기
         file_content = file.read()
         print(f"[Upload] File size: {len(file_content)} bytes")
         
-        # 파일이 비어있는지 확인
         if len(file_content) == 0:
             print("[Upload] Error: Empty file")
             return jsonify({
@@ -1114,7 +1112,6 @@ def upload_words():
                 "details": ["파일에 내용이 없습니다"]
             }), 422
         
-        # 파일 크기 제한 확인 (50MB로 증가)
         if len(file_content) > 50 * 1024 * 1024:
             print("[Upload] Error: File too large")
             return jsonify({
@@ -1122,38 +1119,42 @@ def upload_words():
                 "details": ["파일 크기는 50MB를 초과할 수 없습니다"]
             }), 422
         
-        # BOM 확인 및 제거
-        if file_content.startswith(b'\xef\xbb\xbf'):
-            file_content = file_content[3:]
+        # Try different encodings
+        encodings = ['utf-8', 'cp949', 'euc-kr']
+        content = None
+        
+        for encoding in encodings:
+            try:
+                content = file_content.decode(encoding)
+                print(f"[Upload] Successfully decoded as {encoding}")
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content is None:
+            print("[Upload] Error: Failed to decode file content")
+            return jsonify({
+                "error": "파일 인코딩이 올바르지 않습니다",
+                "details": [
+                    "파일을 UTF-8 또는 CP949(한글 Windows) 인코딩으로 저장해주세요",
+                    "메모장에서 '다른 이름으로 저장' 시 인코딩을 'UTF-8'로 선택하세요"
+                ]
+            }), 422
+        
+        # Remove BOM if present
+        if content.startswith('\ufeff'):
+            content = content[1:]
             print("[Upload] Removed BOM from file")
         
-        # 인코딩 감지 시도
-        try:
-            content = file_content.decode('utf-8')
-            print("[Upload] Successfully decoded as UTF-8")
-        except UnicodeDecodeError:
-            try:
-                content = file_content.decode('cp949')
-                print("[Upload] Successfully decoded as CP949")
-            except UnicodeDecodeError:
-                print("[Upload] Error: Failed to decode file content")
-                return jsonify({
-                    "error": "파일 인코딩이 올바르지 않습니다",
-                    "details": [
-                        "파일을 UTF-8 또는 CP949(한글 Windows) 인코딩으로 저장해주세요",
-                        "메모장에서 '다른 이름으로 저장' 시 인코딩을 'UTF-8'로 선택하세요"
-                    ]
-                }), 422
-        
-        # CSV 파싱을 위해 StringIO 사용
         import csv
         from io import StringIO
         
         csv_file = StringIO(content)
         csv_reader = csv.reader(csv_file, delimiter=',', quotechar='"')
         
-        # 모든 행을 리스트로 변환
         lines = list(csv_reader)
+        print(f"[Upload] Total lines read: {len(lines)}")
+        
         if not lines:
             print("[Upload] Error: No valid data in file")
             return jsonify({
@@ -1161,9 +1162,9 @@ def upload_words():
                 "details": ["파일이 비어있거나 모든 줄이 비어있습니다"]
             }), 422
         
-        # 첫 줄이 헤더인지 확인
-        first_line = [col.lower().strip() for col in lines[0]]
-        if 'english' in first_line and 'korean' in first_line:
+        # Check for header
+        first_line = [col.lower().strip().strip('"') for col in lines[0]]
+        if any('english' in col for col in first_line) and any('korean' in col for col in first_line):
             print("[Upload] Found header, removing first line")
             lines = lines[1:]
         
@@ -1180,45 +1181,51 @@ def upload_words():
         errors = []
         
         for line_num, row in enumerate(lines, 1):
-            if len(row) != 2:
-                error_msg = f"{line_num}번째 줄: 잘못된 형식입니다 (english,korean 형식이어야 합니다)"
-                print(f"[Upload] Error: {error_msg}")
+            try:
+                if len(row) != 2:
+                    print(f"[Upload] Line {line_num} has wrong format: {row}")
+                    error_msg = f"{line_num}번째 줄: 잘못된 형식입니다 (english,korean 형식이어야 합니다)"
+                    errors.append(error_msg)
+                    continue
+                
+                english, korean = [col.strip().strip('"').strip("'").strip() for col in row]
+                
+                if not english or not korean:
+                    print(f"[Upload] Line {line_num} has empty values: {row}")
+                    error_msg = f"{line_num}번째 줄: 영어 또는 한글이 비어있습니다"
+                    errors.append(error_msg)
+                    continue
+                
+                # 영어 단어 검증 (더 유연하게 변경)
+                if not all(c.isalpha() or c.isspace() or c in '-,()' for c in english):
+                    print(f"[Upload] Line {line_num} has invalid English characters: {english}")
+                    error_msg = f"{line_num}번째 줄: 영어 단어에 허용되지 않는 문자가 있습니다"
+                    errors.append(error_msg)
+                    continue
+                
+                # 한글 단어 검증 (더 유연하게 변경)
+                if not all(('\uAC00' <= c <= '\uD7A3') or c.isspace() or c in ',-()~.·' for c in korean):
+                    print(f"[Upload] Line {line_num} has invalid Korean characters: {korean}")
+                    error_msg = f"{line_num}번째 줄: 한글 단어에 허용되지 않는 문자가 있습니다"
+                    errors.append(error_msg)
+                    continue
+                
+                print(f"[Upload] Processing word: {english} -> {korean}")
+                
+                existing_word = Word.query.filter_by(english=english).first()
+                if existing_word:
+                    print(f"[Upload] Duplicate word found: {english}")
+                    duplicates.append(english)
+                    continue
+                
+                word = Word(english=english, korean=korean)
+                words_to_add.append(word)
+                
+            except Exception as e:
+                print(f"[Upload] Error processing line {line_num}: {str(e)}")
+                error_msg = f"{line_num}번째 줄: 처리 중 오류 발생 - {str(e)}"
                 errors.append(error_msg)
                 continue
-            
-            english, korean = [col.strip().strip('"').strip("'").strip() for col in row]
-            
-            if not english or not korean:
-                error_msg = f"{line_num}번째 줄: 영어 또는 한글이 비어있습니다"
-                print(f"[Upload] Error: {error_msg}")
-                errors.append(error_msg)
-                continue
-            
-            # 영어 단어 검증 (하이픈, 공백, 쉼표 허용)
-            if not all(c.isalpha() or c.isspace() or c in '-,' for c in english):
-                error_msg = f"{line_num}번째 줄: 영어 단어에 허용되지 않는 문자가 있습니다 (알파벳, 공백, 하이픈, 쉼표만 허용)"
-                print(f"[Upload] Error: {error_msg}")
-                errors.append(error_msg)
-                continue
-            
-            # 한글 단어 검증 (쉼표와 공백 허용)
-            if not all(('\uAC00' <= c <= '\uD7A3') or c.isspace() or c == ',' for c in korean):
-                error_msg = f"{line_num}번째 줄: 한글 단어에 허용되지 않는 문자가 있습니다 (한글, 공백, 쉼표만 허용)"
-                print(f"[Upload] Error: {error_msg}")
-                errors.append(error_msg)
-                continue
-            
-            print(f"[Upload] Processing word: {english} -> {korean}")
-            
-            # 이미 존재하는 단어 체크
-            existing_word = Word.query.filter_by(english=english).first()
-            if existing_word:
-                print(f"[Upload] Duplicate word found: {english}")
-                duplicates.append(english)
-                continue
-            
-            word = Word(english=english, korean=korean)
-            words_to_add.append(word)
         
         if errors:
             print("[Upload] Found errors:", errors)
@@ -1227,23 +1234,29 @@ def upload_words():
                 "details": errors
             }), 422
         
-        # 새 단어들 추가
         if words_to_add:
             print(f"[Upload] Adding {len(words_to_add)} new words...")
-            # 배치 크기를 1000으로 설정하여 대량의 데이터를 처리
-            batch_size = 1000
-            for i in range(0, len(words_to_add), batch_size):
-                batch = words_to_add[i:i + batch_size]
-                db.session.bulk_save_objects(batch)
-                db.session.commit()
-                print(f"[Upload] Committed batch {i//batch_size + 1}")
-            
-            print("[Upload] Words added successfully")
-            
-            return jsonify({
-                "message": f"{len(words_to_add)}개의 단어가 추가되었습니다",
-                "duplicates": duplicates if duplicates else None
-            }), 200
+            try:
+                batch_size = 1000
+                for i in range(0, len(words_to_add), batch_size):
+                    batch = words_to_add[i:i + batch_size]
+                    db.session.bulk_save_objects(batch)
+                    db.session.commit()
+                    print(f"[Upload] Committed batch {i//batch_size + 1}")
+                
+                print("[Upload] Words added successfully")
+                
+                return jsonify({
+                    "message": f"{len(words_to_add)}개의 단어가 추가되었습니다",
+                    "duplicates": duplicates if duplicates else None
+                }), 200
+            except Exception as e:
+                db.session.rollback()
+                print(f"[Upload] Database error: {str(e)}")
+                return jsonify({
+                    "error": "데이터베이스 저장 중 오류가 발생했습니다",
+                    "details": [str(e)]
+                }), 422
         else:
             print("[Upload] No new words to add")
             if duplicates:
