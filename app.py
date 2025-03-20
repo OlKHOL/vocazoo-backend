@@ -1109,7 +1109,18 @@ def upload_words():
         # 파일이 비어있는지 확인
         if len(file_content) == 0:
             print("[Upload] Error: Empty file")
-            return jsonify({"error": "파일이 비어있습니다"}), 422
+            return jsonify({
+                "error": "파일이 비어있습니다",
+                "details": ["파일에 내용이 없습니다"]
+            }), 422
+        
+        # 파일 크기 제한 확인 (50MB로 증가)
+        if len(file_content) > 50 * 1024 * 1024:
+            print("[Upload] Error: File too large")
+            return jsonify({
+                "error": "파일이 너무 큽니다",
+                "details": ["파일 크기는 50MB를 초과할 수 없습니다"]
+            }), 422
         
         # BOM 확인 및 제거
         if file_content.startswith(b'\xef\xbb\xbf'):
@@ -1128,13 +1139,21 @@ def upload_words():
                 print("[Upload] Error: Failed to decode file content")
                 return jsonify({
                     "error": "파일 인코딩이 올바르지 않습니다",
-                    "details": ["파일을 UTF-8 또는 CP949(한글 Windows) 인코딩으로 저장해주세요"]
+                    "details": [
+                        "파일을 UTF-8 또는 CP949(한글 Windows) 인코딩으로 저장해주세요",
+                        "메모장에서 '다른 이름으로 저장' 시 인코딩을 'UTF-8'로 선택하세요"
+                    ]
                 }), 422
         
-        # 파일 내용을 줄 단위로 분리
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        print(f"[Upload] Found {len(lines)} non-empty lines")
+        # CSV 파싱을 위해 StringIO 사용
+        import csv
+        from io import StringIO
         
+        csv_file = StringIO(content)
+        csv_reader = csv.reader(csv_file, delimiter=',', quotechar='"')
+        
+        # 모든 행을 리스트로 변환
+        lines = list(csv_reader)
         if not lines:
             print("[Upload] Error: No valid data in file")
             return jsonify({
@@ -1143,8 +1162,8 @@ def upload_words():
             }), 422
         
         # 첫 줄이 헤더인지 확인
-        first_line = lines[0].lower()
-        if first_line in ['english,korean', 'english, korean']:
+        first_line = [col.lower().strip() for col in lines[0]]
+        if 'english' in first_line and 'korean' in first_line:
             print("[Upload] Found header, removing first line")
             lines = lines[1:]
         
@@ -1160,25 +1179,31 @@ def upload_words():
         duplicates = []
         errors = []
         
-        for line_num, line in enumerate(lines, 1):
-            # 콤마로 분리
-            parts = [part.strip() for part in line.split(',')]
-            
-            if len(parts) != 2:
+        for line_num, row in enumerate(lines, 1):
+            if len(row) != 2:
                 error_msg = f"{line_num}번째 줄: 잘못된 형식입니다 (english,korean 형식이어야 합니다)"
                 print(f"[Upload] Error: {error_msg}")
-                print(f"[Upload] Line content: {line}")
                 errors.append(error_msg)
                 continue
             
-            english, korean = parts
-            
-            # 따옴표 제거
-            english = english.strip('"').strip("'").strip()
-            korean = korean.strip('"').strip("'").strip()
+            english, korean = [col.strip().strip('"').strip("'").strip() for col in row]
             
             if not english or not korean:
                 error_msg = f"{line_num}번째 줄: 영어 또는 한글이 비어있습니다"
+                print(f"[Upload] Error: {error_msg}")
+                errors.append(error_msg)
+                continue
+            
+            # 영어 단어 검증 (하이픈, 공백, 쉼표 허용)
+            if not all(c.isalpha() or c.isspace() or c in '-,' for c in english):
+                error_msg = f"{line_num}번째 줄: 영어 단어에 허용되지 않는 문자가 있습니다 (알파벳, 공백, 하이픈, 쉼표만 허용)"
+                print(f"[Upload] Error: {error_msg}")
+                errors.append(error_msg)
+                continue
+            
+            # 한글 단어 검증 (쉼표와 공백 허용)
+            if not all(('\uAC00' <= c <= '\uD7A3') or c.isspace() or c == ',' for c in korean):
+                error_msg = f"{line_num}번째 줄: 한글 단어에 허용되지 않는 문자가 있습니다 (한글, 공백, 쉼표만 허용)"
                 print(f"[Upload] Error: {error_msg}")
                 errors.append(error_msg)
                 continue
@@ -1205,8 +1230,14 @@ def upload_words():
         # 새 단어들 추가
         if words_to_add:
             print(f"[Upload] Adding {len(words_to_add)} new words...")
-            db.session.bulk_save_objects(words_to_add)
-            db.session.commit()
+            # 배치 크기를 1000으로 설정하여 대량의 데이터를 처리
+            batch_size = 1000
+            for i in range(0, len(words_to_add), batch_size):
+                batch = words_to_add[i:i + batch_size]
+                db.session.bulk_save_objects(batch)
+                db.session.commit()
+                print(f"[Upload] Committed batch {i//batch_size + 1}")
+            
             print("[Upload] Words added successfully")
             
             return jsonify({
