@@ -1081,66 +1081,162 @@ def get_account():
 @app.route("/admin/upload_words", methods=["POST"])
 @admin_required
 def upload_words():
+    print("[Upload] Starting file upload process...")
+    
     if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+        print("[Upload] Error: No file in request")
+        return jsonify({"error": "파일이 제공되지 않았습니다"}), 400
         
     file = request.files['file']
+    print(f"[Upload] Received file: {file.filename}")
+    print(f"[Upload] Content Type: {file.content_type}")
+    print(f"[Upload] File Headers: {dict(file.headers)}")
+    
     if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
+        print("[Upload] Error: Empty filename")
+        return jsonify({"error": "파일이 선택되지 않았습니다"}), 400
         
     if not (file.filename.endswith('.csv') or file.filename.endswith('.txt')):
-        return jsonify({"error": "Only CSV and TXT files are allowed"}), 400
+        print(f"[Upload] Error: Invalid file extension: {file.filename}")
+        return jsonify({"error": "CSV 또는 TXT 파일만 업로드 가능합니다"}), 400
     
     try:
-        # 파일 읽기
-        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+        print("[Upload] Reading file content...")
+        # 파일 내용을 바이트로 읽기
+        file_content = file.read()
+        print(f"[Upload] File size: {len(file_content)} bytes")
         
-        # CSV 또는 TXT 파일 읽기
-        if file.filename.endswith('.csv'):
-            csv_input = csv.reader(stream)
-            next(csv_input)  # 헤더 스킵
-        else:  # TXT 파일
-            lines = stream.readlines()
-            # TXT 파일의 첫 줄이 헤더인 경우 스킵
-            if lines and lines[0].strip().lower() in ['english,korean', 'english, korean']:
-                lines = lines[1:]
-            csv_input = [line.strip().split(',') for line in lines if line.strip()]
+        # 파일이 비어있는지 확인
+        if len(file_content) == 0:
+            print("[Upload] Error: Empty file")
+            return jsonify({"error": "파일이 비어있습니다"}), 422
         
+        # BOM 확인 및 제거
+        if file_content.startswith(b'\xef\xbb\xbf'):
+            file_content = file_content[3:]
+            print("[Upload] Removed BOM from file")
+        
+        # 인코딩 감지 시도
+        try:
+            content = file_content.decode('utf-8')
+            print("[Upload] Successfully decoded as UTF-8")
+        except UnicodeDecodeError:
+            try:
+                content = file_content.decode('cp949')
+                print("[Upload] Successfully decoded as CP949")
+            except UnicodeDecodeError:
+                print("[Upload] Error: Failed to decode file content")
+                return jsonify({
+                    "error": "파일 인코딩이 올바르지 않습니다",
+                    "details": ["파일을 UTF-8 또는 CP949(한글 Windows) 인코딩으로 저장해주세요"]
+                }), 422
+        
+        # 파일 내용을 줄 단위로 분리
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        print(f"[Upload] Found {len(lines)} non-empty lines")
+        
+        if not lines:
+            print("[Upload] Error: No valid data in file")
+            return jsonify({
+                "error": "파일에 유효한 데이터가 없습니다",
+                "details": ["파일이 비어있거나 모든 줄이 비어있습니다"]
+            }), 422
+        
+        # 첫 줄이 헤더인지 확인
+        first_line = lines[0].lower()
+        if first_line in ['english,korean', 'english, korean']:
+            print("[Upload] Found header, removing first line")
+            lines = lines[1:]
+        
+        if not lines:
+            print("[Upload] Error: No data after header")
+            return jsonify({
+                "error": "데이터가 없습니다",
+                "details": ["헤더를 제외하고 데이터가 없습니다"]
+            }), 422
+        
+        print("[Upload] Processing words...")
         words_to_add = []
         duplicates = []
+        errors = []
         
-        for row in csv_input:
-            if len(row) < 2:
-                continue
-                
-            english, korean = row[0].strip(), row[1].strip()
+        for line_num, line in enumerate(lines, 1):
+            # 콤마로 분리
+            parts = [part.strip() for part in line.split(',')]
             
-            # 따옴표 제거 (있는 경우)
-            english = english.strip('"').strip("'")
-            korean = korean.strip('"').strip("'")
+            if len(parts) != 2:
+                error_msg = f"{line_num}번째 줄: 잘못된 형식입니다 (english,korean 형식이어야 합니다)"
+                print(f"[Upload] Error: {error_msg}")
+                print(f"[Upload] Line content: {line}")
+                errors.append(error_msg)
+                continue
+            
+            english, korean = parts
+            
+            # 따옴표 제거
+            english = english.strip('"').strip("'").strip()
+            korean = korean.strip('"').strip("'").strip()
+            
+            if not english or not korean:
+                error_msg = f"{line_num}번째 줄: 영어 또는 한글이 비어있습니다"
+                print(f"[Upload] Error: {error_msg}")
+                errors.append(error_msg)
+                continue
+            
+            print(f"[Upload] Processing word: {english} -> {korean}")
             
             # 이미 존재하는 단어 체크
             existing_word = Word.query.filter_by(english=english).first()
             if existing_word:
+                print(f"[Upload] Duplicate word found: {english}")
                 duplicates.append(english)
                 continue
             
             word = Word(english=english, korean=korean)
             words_to_add.append(word)
         
+        if errors:
+            print("[Upload] Found errors:", errors)
+            return jsonify({
+                "error": "파일 처리 중 오류가 발생했습니다",
+                "details": errors
+            }), 422
+        
         # 새 단어들 추가
         if words_to_add:
+            print(f"[Upload] Adding {len(words_to_add)} new words...")
             db.session.bulk_save_objects(words_to_add)
             db.session.commit()
-        
-        return jsonify({
-            "message": f"{len(words_to_add)} words added successfully",
-            "duplicates": duplicates
-        }), 200
+            print("[Upload] Words added successfully")
+            
+            return jsonify({
+                "message": f"{len(words_to_add)}개의 단어가 추가되었습니다",
+                "duplicates": duplicates if duplicates else None
+            }), 200
+        else:
+            print("[Upload] No new words to add")
+            if duplicates:
+                return jsonify({
+                    "error": "추가된 단어가 없습니다",
+                    "details": ["모든 단어가 이미 존재합니다"],
+                    "duplicates": duplicates
+                }), 422
+            else:
+                return jsonify({
+                    "error": "추가된 단어가 없습니다",
+                    "details": ["유효한 단어 데이터가 없습니다"]
+                }), 422
         
     except Exception as e:
+        print(f"[Upload] Unexpected error: {str(e)}")
+        print(f"[Upload] Error type: {type(e)}")
+        import traceback
+        print("[Upload] Traceback:", traceback.format_exc())
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": "파일 처리 중 오류가 발생했습니다",
+            "details": ["파일 형식과 인코딩을 확인해주세요", str(e)]
+        }), 422
 
 # 첫 요청시 테이블 생성 (Flask 2.0 이상에서는 권장되지 않음)
 # 대신 애플리케이션 초기화 시 create_tables 함수를 직접 호출
